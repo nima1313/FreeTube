@@ -6,9 +6,12 @@
     "@react-native-async-storage/async-storage": "2.2.0",
     "@react-native-cookies/cookies": "^6.2.1",
     "expo": "~57.0.7",
+    "expo-keep-awake": "~57.0.2",
+    "expo-screen-orientation": "~57.0.2",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",
     "react-native": "0.86.0",
+    "react-native-safe-area-context": "~5.7.0",
     "react-native-webview": "13.16.1"
   },
   "devDependencies": {
@@ -22,6 +25,12 @@
     "check": "node scripts/check-injection.mjs",
     "start": "expo start",
     "android": "expo run:android",
+    "prebuild:youtube": "EXPO_PUBLIC_APP_PROFILE=youtube expo prebuild --clean",
+    "prebuild:instagram": "EXPO_PUBLIC_APP_PROFILE=instagram expo prebuild --clean",
+    "prebuild:telegram": "EXPO_PUBLIC_APP_PROFILE=telegram expo prebuild --clean",
+    "android:youtube": "EXPO_PUBLIC_APP_PROFILE=youtube expo run:android",
+    "android:instagram": "EXPO_PUBLIC_APP_PROFILE=instagram expo run:android",
+    "android:telegram": "EXPO_PUBLIC_APP_PROFILE=telegram expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
     "postinstall": "patch-package"

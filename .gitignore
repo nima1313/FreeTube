@@ -39,3 +39,7 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# signing key preserved across prebuild --clean by scripts/build-apk.sh
+.keystore-backup/
+build/

@@ -4,5 +4,6 @@
 export const USER_AGENT =
   'Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36';
 
-// Schemes that hand off to the native YouTube app / Play Store — always blocked.
-export const BLOCKED_SCHEMES = ['intent:', 'vnd.youtube:', 'market:'];
+// Schemes that hand off to a native app / the Play Store — always blocked.
+// Site-specific ones (vnd.youtube:, instagram:) live on the profile instead.
+export const BLOCKED_SCHEMES = ['intent:', 'market:'];

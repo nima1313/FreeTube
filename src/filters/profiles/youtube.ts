@@ -8,7 +8,9 @@ import { SiteProfile } from '../types';
 export const youtubeProfile: SiteProfile = {
   id: 'youtube',
   label: 'YouTube',
-  startUrl: 'https://m.youtube.com/',
+  // Subscriptions, not Home — Home has no purpose once its feed is gone, and
+  // starting here avoids a redirect flash on every cold start.
+  startUrl: 'https://m.youtube.com/feed/subscriptions',
   allowedHosts: [
     'youtube.com',
     'accounts.google.com',
@@ -19,13 +21,14 @@ export const youtubeProfile: SiteProfile = {
     'google.com',
     'gstatic.com',
   ],
+  blockedSchemes: ['vnd.youtube:'],
   rules: [
     {
       id: 'hide-shorts',
       label: 'Hide Shorts',
       description: 'Shelves, tiles, the bottom-nav button and the channel tab',
       enabledByDefault: true,
-      jsAction: 'blockShortsNavigation',
+      blockPathPattern: '/shorts/',
       css: [
         'ytm-reel-shelf-renderer',
         'ytm-shorts-lockup-view-model',
@@ -38,9 +41,28 @@ export const youtubeProfile: SiteProfile = {
       ],
     },
     {
+      id: 'remove-home',
+      label: 'Remove Home',
+      description: 'Home bounces to Subscriptions and its nav button is gone',
+      enabledByDefault: true,
+      // Redirect rather than block: YouTube routes through / when coming back
+      // from sign-in, and a block would leave a dead screen there.
+      redirect: { from: '^/$', to: '/feed/subscriptions' },
+      // Redundant on purpose — the class, the endpoint id, the href and the
+      // position are independent hooks, so YouTube renaming any one of them
+      // still leaves the button hidden. Home is always the first pivot item.
+      css: [
+        'ytm-pivot-bar-item-renderer:has(.pivot-home)',
+        'ytm-pivot-bar-item-renderer:has(a[href="/"])',
+        'ytm-pivot-bar-item-renderer[tab-identifier="FEwhat_to_watch"]',
+        'ytm-pivot-bar-item-renderer:has([aria-label="Home"])',
+        'ytm-pivot-bar-renderer > ytm-pivot-bar-item-renderer:first-child',
+      ],
+    },
+    {
       id: 'hide-home-feed',
-      label: 'Hide home feed',
-      description: 'Blank home page — search and subscriptions still work',
+      label: 'Blank the home feed',
+      description: 'Only matters if Remove Home is off',
       enabledByDefault: true,
       pathScope: '^/$',
       css: ['ytm-browse ytm-rich-grid-renderer', 'ytm-browse ytm-section-list-renderer'],

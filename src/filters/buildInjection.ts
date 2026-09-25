@@ -1,5 +1,5 @@
 import { BOOTSTRAP_TEMPLATE } from '../injection/bootstrap';
-import { EnabledMap, InjectedRule, SiteProfile } from './types';
+import { EnabledMap, InjectedRule, ParamMap, SiteProfile } from './types';
 
 export function isRuleEnabled(profile: SiteProfile, enabledMap: EnabledMap, ruleId: string): boolean {
   const rule = profile.rules.find((r) => r.id === ruleId);
@@ -7,11 +7,30 @@ export function isRuleEnabled(profile: SiteProfile, enabledMap: EnabledMap, rule
   return enabledMap[ruleId] ?? rule.enabledByDefault;
 }
 
-function serializeRules(profile: SiteProfile, enabledMap: EnabledMap): string {
+/** Path patterns from currently-enabled rules, for the navigation policy. */
+export function activeBlockedPaths(profile: SiteProfile, enabledMap: EnabledMap): string[] {
+  return profile.rules
+    .filter((r) => r.blockPathPattern && (enabledMap[r.id] ?? r.enabledByDefault))
+    .map((r) => r.blockPathPattern as string);
+}
+
+function serializeRules(
+  profile: SiteProfile,
+  enabledMap: EnabledMap,
+  paramMap: ParamMap
+): string {
   const rules: InjectedRule[] = profile.rules.map((r) => ({
     id: r.id,
     css: r.css,
+    redirect: r.redirect,
+    textFilters: r.textFilters,
     jsAction: r.jsAction,
+    // Left undefined (and so dropped by JSON.stringify) for rules without a
+    // param, which keeps the injected payload byte-identical for profiles that
+    // have none.
+    param: r.param ? paramMap[r.id] ?? r.param.defaultValue : undefined,
+    deferUntil: r.deferUntil,
+    blockPathPattern: r.blockPathPattern,
     pathScope: r.pathScope,
     enabled: enabledMap[r.id] ?? r.enabledByDefault,
   }));
@@ -21,15 +40,23 @@ function serializeRules(profile: SiteProfile, enabledMap: EnabledMap): string {
 }
 
 /** Full bootstrap script for injectedJavaScriptBeforeContentLoaded. */
-export function buildBootstrap(profile: SiteProfile, enabledMap: EnabledMap): string {
-  return BOOTSTRAP_TEMPLATE.replace('__RULES__', serializeRules(profile, enabledMap));
+export function buildBootstrap(
+  profile: SiteProfile,
+  enabledMap: EnabledMap,
+  paramMap: ParamMap = {}
+): string {
+  return BOOTSTRAP_TEMPLATE.replace('__RULES__', serializeRules(profile, enabledMap, paramMap));
 }
 
 /** Incremental re-apply for webviewRef.injectJavaScript() after a toggle flips. */
-export function buildApplyCall(profile: SiteProfile, enabledMap: EnabledMap): string {
+export function buildApplyCall(
+  profile: SiteProfile,
+  enabledMap: EnabledMap,
+  paramMap: ParamMap = {}
+): string {
   return (
     'window.__unhook && window.__unhook.apply(' +
-    serializeRules(profile, enabledMap) +
+    serializeRules(profile, enabledMap, paramMap) +
     '); true;'
   );
 }
