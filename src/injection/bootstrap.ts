@@ -312,6 +312,13 @@ export const BOOTSTRAP_TEMPLATE = `
     return null;
   }
 
+  // WebK listens for taps on mousedown on touch devices and on click
+  // elsewhere, so send both; each platform ignores the other.
+  function tapTab(tab) {
+    tab.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    tab.click();
+  }
+
   var FOCUS_TICK_MS = 400;
   var FOCUS_GIVE_UP_MS = 20000;
   // Active this many ticks in a row counts as settled.
@@ -351,7 +358,7 @@ export const BOOTSTRAP_TEMPLATE = `
       } else {
         stable = 0;
         if (tab) {
-          tab.click();
+          tapTab(tab);
           clicks++;
         }
       }
@@ -610,6 +617,97 @@ export const BOOTSTRAP_TEMPLATE = `
     }, 50);
   }
 
+  // --- Focus folder: load all of its chats ----------------------------------
+  // WebK lists a folder's chats only if their dialogs are already in its local
+  // cache, and never fetches the rest — so older chats added to the folder
+  // silently never show up. Load those dialogs explicitly; WebK then adds them
+  // to the folder list by itself.
+
+  // The folder whose tab label is name: its filter (explicit chat list) and
+  // dialog index key (e.g. "index_5" — a dialog belongs to the folder exactly
+  // when it has a value under that key). Null if there is no such tab yet.
+  function findFolder(name) {
+    var tab = findFocusTab(name);
+    var dm = window.appDialogsManager;
+    if (!tab || !dm || !dm.managers) return Promise.resolve(null);
+    var id = Number(tab.getAttribute('data-filter-id'));
+    return Promise.resolve(dm.managers.filtersStorage.getFilter(id)).then(function (f) {
+      if (!f || f.localId === undefined) return null;
+      return { filter: f, key: 'index_' + f.localId };
+    });
+  }
+
+  // Pinned and included chats, as peer ids and as input peers, index-aligned.
+  function folderPeerIds(filter) {
+    return (filter.pinnedPeerIds || []).concat(filter.includePeerIds || []);
+  }
+
+  function folderInputPeers(filter) {
+    return (filter.pinned_peers || []).concat(filter.include_peers || []);
+  }
+
+  function hydrateFolder(name) {
+    return findFolder(name).then(function (folder) {
+      // Tabs not rendered yet — retry on the next tick.
+      if (!folder) return null;
+      var mm = window.appDialogsManager.managers.appMessagesManager;
+      var ids = folderPeerIds(folder.filter);
+      var inputs = folderInputPeers(folder.filter);
+      return Promise.all(
+        ids.map(function (id, i) {
+          if (!inputs[i]) return null;
+          return Promise.resolve(mm.getDialogOnly(id)).then(function (dialog) {
+            return dialog ? null : inputs[i];
+          });
+        })
+      ).then(function (found) {
+        var missing = found.filter(Boolean);
+        // The input peers carry access hashes, so this works even for chats
+        // WebK has never seen.
+        return Promise.all(
+          missing.map(function (p) {
+            return Promise.resolve(mm.reloadConversation(p)).catch(function () {});
+          })
+        ).then(function () {
+          return { loaded: missing.length };
+        });
+      });
+    });
+  }
+
+  // Folder name already loaded this page session.
+  var hydrated = '';
+  var hydrating = false;
+
+  function maybeHydrate() {
+    var name = actionEnabled('focusFolder') ? normLabel(actionParam('focusFolder')) : '';
+    if (!name || name === hydrated || hydrating || !window.appDialogsManager) return;
+    hydrating = true;
+    Promise.resolve()
+      .then(function () {
+        return hydrateFolder(name);
+      })
+      .then(function (done) {
+        if (!done) return;
+        hydrated = name;
+        post({ type: 'action', what: 'focus-folder-loaded', name: name, loaded: done.loaded });
+        // A name-filtered list serves a cached scan — rebuild it to include
+        // the chats that were just loaded.
+        if (done.loaded && chatPatched && chatFiltering()) {
+          chatScans = new WeakMap();
+          refreshLists();
+        }
+      })
+      .catch(function (e) {
+        console.warn('[unhook] could not load folder chats', e);
+      })
+      .then(function () {
+        hydrating = false;
+      });
+  }
+
+  if (ruleFor('focusFolder')) setInterval(maybeHydrate, 500);
+
   // --- Focus lock -----------------------------------------------------------
   // The filters only shape the chat list; Telegram still opens any chat reached
   // another way (a channel link in a message, a mention). With the lock on, the
@@ -627,22 +725,15 @@ export const BOOTSTRAP_TEMPLATE = `
   var guardPeer = null;
   var guardToken = 0;
 
+  // The chat on screen, or 0. On a phone-width layout WebK closes a chat by
+  // sliding back to the list without clearing chat.peerId, so the peer alone
+  // would keep judging a chat the user already left. tabId (0 = chat list,
+  // 1 = chat, 2 = profile) tracks what is actually showing.
   function openPeerId() {
     var im = window.appImManager;
-    return (im && im.chat && im.chat.peerId) || 0;
-  }
-
-  // The folder's dialog index key (e.g. "index_5"): a dialog belongs to the
-  // folder exactly when it has a value under that key. Null if not found.
-  function folderIndexKey(name) {
-    var tab = findFocusTab(name);
-    if (!tab) return Promise.resolve(null);
-    var id = Number(tab.getAttribute('data-filter-id'));
-    var dm = window.appDialogsManager;
-    if (dm.xds && dm.xds[id]) return Promise.resolve(dm.xds[id].indexKey);
-    return Promise.resolve(dm.managers.filtersStorage.getFilter(id)).then(function (f) {
-      return f && f.localId !== undefined ? 'index_' + f.localId : null;
-    });
+    if (!im || !im.chat) return 0;
+    if (im.tabId !== undefined && im.tabId < 1) return 0;
+    return im.chat.peerId || 0;
   }
 
   function guardAllows(peerId) {
@@ -652,13 +743,18 @@ export const BOOTSTRAP_TEMPLATE = `
     var folder = actionEnabled('focusFolder') ? normLabel(actionParam('focusFolder')) : '';
     if (allow.length && anyHit(title, allow)) return true;
     if (!folder) return !allow.length;
-    return folderIndexKey(folder).then(function (key) {
+    return findFolder(folder).then(function (found) {
       // Folder not found (renamed, or not loaded yet): fail open.
-      if (!key) return true;
+      if (!found) return true;
+      // The explicit list covers chats WebK has not cached yet.
+      var listed = folderPeerIds(found.filter);
+      for (var i = 0; i < listed.length; i++) {
+        if (String(listed[i]) === String(peerId)) return true;
+      }
       return Promise.resolve(
         window.appDialogsManager.managers.appMessagesManager.getDialogOnly(peerId)
       ).then(function (dialog) {
-        return !!dialog && dialog[key] !== undefined;
+        return !!dialog && dialog[found.key] != null;
       });
     });
   }
@@ -669,16 +765,22 @@ export const BOOTSTRAP_TEMPLATE = `
   }
 
   // Covers the open chat's message area only, which leaves Telegram's own
-  // header — and its back arrow — usable. Falls back to the whole viewport.
+  // header — and its back arrow — usable. .bubbles runs the full height of the
+  // chat behind the header, so the overlay starts below the header instead.
+  // Falls back to the whole viewport.
   function positionGuard(ov) {
-    var target = document.querySelector('#column-center .chat.active .bubbles');
+    var chat = document.querySelector('#column-center .chat.active');
+    var target = chat && chat.querySelector('.bubbles');
     var r = target
       ? target.getBoundingClientRect()
       : { top: 0, left: 0, width: window.innerWidth, height: window.innerHeight };
-    ov.style.top = r.top + 'px';
+    var top = r.top;
+    var bar = target && chat.querySelector('.topbar');
+    if (bar) top = Math.max(top, bar.getBoundingClientRect().bottom);
+    ov.style.top = top + 'px';
     ov.style.left = r.left + 'px';
     ov.style.width = r.width + 'px';
-    ov.style.height = r.height + 'px';
+    ov.style.height = Math.max(0, r.top + r.height - top) + 'px';
   }
 
   function closeChat() {

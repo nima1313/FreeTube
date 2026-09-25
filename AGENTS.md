@@ -54,18 +54,31 @@ rules carry on:
   3000, cached 30s) and serves pages out of the matches, so Telegram renders a
   gap-free list. `"saved messages"` matches your own chat. While waiting for
   the patch, `<html data-unhook-tg-loading>` hides the unfiltered list (8s max).
-- **Open a folder on launch** (`focusFolder`) clicks the tab in `#folders-tabs`
+- **Open a folder on launch** (`focusFolder`) taps the tab in `#folders-tabs`
   whose `.text-super` label matches, until it has been `.active` for 3 ticks
   (400ms, gives up after 20s) — Telegram restores the last-open folder a beat
-  after load. A hidden tab still switches, so `hide-folder-tabs` needs no
-  special handling.
-- **Block other chats** (`focusLock`) checks the open chat
-  (`appImManager.chat.peerId`) every 100ms: allowed if it is in the focus
-  folder (real membership via the folder's dialog index key) or matches a
-  "show only" name, and never if it matches a "hide" name. The overlay covers
-  only the message area, so Telegram's own back arrow stays usable; its button
-  calls `appImManager.setPeer({peerId: 0})`. Unknown folder or internal error
-  → fail open. Never trap the user behind an overlay.
+  after load. WebK listens for taps on `mousedown` on touch devices (so
+  `.click()` alone does nothing in the app) and on `click` elsewhere; the tap
+  sends both. A hidden tab still switches, so `hide-folder-tabs` needs no
+  special handling. WebK only lists folder chats whose dialogs are already in
+  its local cache and never fetches the rest, so once per page load the
+  folder's explicit chats (`pinned_peers` + `include_peers` from
+  `filtersStorage.getFilter`) that `getDialogOnly` doesn't know are loaded
+  with `appMessagesManager.reloadConversation`; WebK then adds them to the
+  list itself. A name-filtered list is rebuilt afterwards.
+- **Block other chats** (`focusLock`) checks the open chat every 100ms:
+  allowed if it is in the focus folder (on the folder's explicit chat list, or
+  a member via its dialog index key) or matches a "show only" name, and never if it matches a
+  "hide" name. On a phone-width layout WebK closes a chat by sliding back to
+  the list **without clearing `appImManager.chat.peerId`**, so "open chat"
+  means `appImManager.tabId >= 1` (0 = list, 1 = chat, 2 = profile) *and* that
+  peer. The overlay covers only the message area below `.topbar` (`.bubbles`
+  runs behind the header), so Telegram's own back arrow stays usable; its
+  button calls `appImManager.setPeer({peerId: 0})`. Unknown folder or internal
+  error → fail open. Never trap the user behind an overlay.
+- **Hide the menu button** must not hide `.animated-menu-icon.state-back`: the
+  same element draws the back arrow that closes search, and with the search
+  bar also hidden, search mode is otherwise a blank column with no way out.
 
 Session state lives in **IndexedDB + localStorage**, not cookies, so the
 `CookieManager` flushing in `BrowserScreen` does nothing here; persistence comes

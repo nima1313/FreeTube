@@ -58,10 +58,13 @@ export const telegramProfile: SiteProfile = {
       label: 'Hide the menu button',
       description: 'The hamburger that opens settings',
       enabledByDefault: false,
-      // The hamburger only; its sibling back-arrow stays usable during search.
+      // The hamburger only. .animated-menu-icon also draws the back arrow that
+      // closes search (it gets .state-back), so it stays visible then —
+      // otherwise search mode, with the search bar hidden too, is a blank
+      // column with no way out.
       css: [
         '#column-left .left-sidebar-burger .btn-menu-toggle',
-        '#column-left .left-sidebar-burger .animated-menu-icon',
+        '#column-left .left-sidebar-burger .animated-menu-icon:not(.state-back)',
       ],
     },
     {

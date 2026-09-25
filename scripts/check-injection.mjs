@@ -441,14 +441,16 @@ const TG_TABS =
 const TG_HTML =
   '<html><head></head><body>' +
   '<div id="column-left">' + TG_TABS + '<div id="folders-container"></div></div>' +
-  '<div id="column-center"><div class="chat active"><div class="bubbles"></div></div></div>' +
+  '<div id="column-center"><div class="chat active">' +
+  '<div class="sidebar-header topbar"></div><div class="bubbles"></div></div></div>' +
   '</body></html>';
 
-// Folder tabs switch like WebK's: the clicked one becomes .active.
-function wireTabs(window, clicks) {
+// Folder tabs switch like WebK's: the tapped one becomes .active. On touch
+// devices WebK listens for mousedown instead of click.
+function wireTabs(window, clicks, { touch = false } = {}) {
   const tabs = window.document.querySelectorAll('.menu-horizontal-div-item');
   for (const tab of tabs) {
-    tab.addEventListener('click', () => {
+    tab.addEventListener(touch ? 'mousedown' : 'click', () => {
       clicks[tab.id] = (clicks[tab.id] || 0) + 1;
       for (const t of tabs) t.classList.toggle('active', t === tab);
     });
@@ -457,13 +459,25 @@ function wireTabs(window, clicks) {
 
 // Dialogs are numbered 1..n in list order, with WebK's descending index keys:
 // index_0 for All, index_5 for the "focus mode" folder's members.
-function fakeWebK(window, { names, folder = [], myId, openPeer = 0 }) {
-  const dialogs = names.map((name, i) => {
+// mobile: closing a chat only slides back to the list (tabId 0) and keeps
+// chat.peerId, as WebK does on a phone-width layout.
+// uncached: folder members WebK has no dialog for yet (they are on the
+// folder's explicit list, but getDialogOnly returns nothing until
+// reloadConversation loads them).
+function fakeWebK(window, { names, folder = [], uncached = [], myId, openPeer = 0, mobile = false }) {
+  const all = names.map((name, i) => {
     const d = { peerId: i + 1, index_0: 100000 - i };
-    if (folder.includes(name)) d.index_5 = 100000 - i;
+    if (folder.includes(name) || uncached.includes(name)) d.index_5 = 100000 - i;
     return d;
   });
-  const calls = { fetches: 0, fullResets: 0, otherResets: 0, setPeer: [] };
+  const dialogs = all.filter((d) => !uncached.includes(names[d.peerId - 1]));
+  const members = folder.concat(uncached).map((n) => names.indexOf(n) + 1);
+  const filter5 = {
+    localId: 5,
+    includePeerIds: members,
+    include_peers: members.map((id) => ({ _: 'inputPeerUser', user_id: id })),
+  };
+  const calls = { fetches: 0, fullResets: 0, otherResets: 0, setPeer: [], reloaded: [] };
   // Methods live on a base class, as in WebK, and the lists are a subclass:
   // the patch has to land on the base for every list to go through it.
   class BaseList {
@@ -507,8 +521,15 @@ function fakeWebK(window, { names, folder = [], myId, openPeer = 0 }) {
     managers: {
       appMessagesManager: {
         getDialogOnly: (peerId) => Promise.resolve(dialogs.find((d) => d.peerId === peerId)),
+        reloadConversation: (input) => {
+          calls.reloaded.push(input.user_id);
+          if (!dialogs.some((d) => d.peerId === input.user_id)) {
+            dialogs.push(all.find((d) => d.peerId === input.user_id));
+          }
+          return Promise.resolve();
+        },
       },
-      filtersStorage: { getFilter: (id) => Promise.resolve(id === 5 ? { localId: 5 } : undefined) },
+      filtersStorage: { getFilter: (id) => Promise.resolve(id === 5 ? filter5 : undefined) },
     },
   };
   window.apiManagerProxy = {
@@ -520,9 +541,11 @@ function fakeWebK(window, { names, folder = [], myId, openPeer = 0 }) {
   window.rootScope = { myId };
   window.appImManager = {
     chat: { peerId: openPeer },
+    tabId: openPeer ? 1 : 0,
     setPeer({ peerId }) {
       calls.setPeer.push(peerId);
-      this.chat.peerId = peerId;
+      this.tabId = peerId ? 1 : 0;
+      if (peerId || !mobile) this.chat.peerId = peerId;
     },
   };
   const id = (name) => names.indexOf(name) + 1;
@@ -584,6 +607,16 @@ check('the folder is re-opened when Telegram restores the last one', async () =>
   await sleep(2000);
   assert(clicks['tab-focus'] >= 2, 'restored folder was not fought: ' + JSON.stringify(clicks));
   assert(d.window.document.getElementById('tab-focus').classList.contains('active'), 'folder not open');
+});
+
+check('the focus tab is tapped the way WebK listens on touch devices', async () => {
+  const clicks = {};
+  const d = boot(TG_HTML, TG_URL, telegramProfile, { 'focus-folder': true }, {},
+    (w) => wireTabs(w, clicks, { touch: true }));
+  await sleep(1800);
+  assert(d.window.document.getElementById('tab-focus').classList.contains('active'),
+    'folder not opened by mousedown: ' + JSON.stringify(clicks));
+  assert(clicks['tab-focus'] === 1, 'kept tapping an open folder: ' + JSON.stringify(clicks));
 });
 
 check('a folder that does not exist is never faked', async () => {
@@ -691,8 +724,55 @@ check('the list stays hidden until WebK is ready, then filters', async () => {
   assert((await listAll(wk.xd)).count === 1, 'late patch did not filter');
 });
 
+check('hiding the menu button keeps the search back arrow', () => {
+  const d = boot(TG_HTML, TG_URL, telegramProfile, { 'hide-menu-button': true });
+  const doc = d.window.document;
+  const burger = doc.createElement('div');
+  burger.className = 'left-sidebar-burger';
+  burger.innerHTML = '<div class="animated-menu-icon"></div>';
+  doc.getElementById('column-left').appendChild(burger);
+  const icon = burger.firstChild;
+  const sels = telegramProfile.rules.find((r) => r.id === 'hide-menu-button').css;
+  const hidden = () => sels.some((s) => icon.matches(s));
+  assert(hidden(), 'hamburger icon not hidden');
+  icon.classList.add('state-back');
+  assert(!hidden(), 'back arrow hidden in search mode — no way out of search');
+});
+
 check('other profiles carry none of the chat filter', () =>
   assert(!buildBootstrap(youtubeProfile, {}).includes('"jsAction":"chatWhitelist"'), 'leaked'));
+
+console.log('\n-- telegram focus folder: loading uncached chats --');
+check('folder chats missing from the cache are loaded, once', async () => {
+  let wk;
+  const d = boot(TG_HTML, TG_URL, telegramProfile, { 'focus-folder': true }, {},
+    (w) => (wk = fakeWebK(w, { names: NAMES, myId: ME, folder: ['Family'], uncached: ['Spam 3', 'Spam 9'] })));
+  await sleep(1300);
+  const got = wk.calls.reloaded.slice().sort((a, b) => a - b);
+  assert(JSON.stringify(got) === JSON.stringify([wk.id('Spam 3'), wk.id('Spam 9')]),
+    'reloaded ' + JSON.stringify(wk.calls.reloaded));
+  const hit = d.posted.find((m) => m.what === 'focus-folder-loaded');
+  assert(hit && hit.loaded === 2, JSON.stringify(d.posted));
+});
+
+check('loading folder chats rebuilds a name-filtered list', async () => {
+  let wk;
+  boot(TG_HTML, TG_URL, telegramProfile, { 'focus-folder': true, ...WHITELIST },
+    { 'show-only-chats': 'work' },
+    (w) => (wk = fakeWebK(w, { names: NAMES, myId: ME, uncached: ['Work chat'] })));
+  await sleep(1300);
+  assert(wk.calls.reloaded.length === 1, 'not loaded: ' + JSON.stringify(wk.calls));
+  assert(wk.calls.fullResets === 2, 'list not rebuilt after loading: ' + wk.calls.fullResets);
+  assert((await listAll(wk.xd)).count === 1, 'loaded chat missing from the filtered list');
+});
+
+check('nothing is loaded while focus-folder is off', async () => {
+  let wk;
+  boot(TG_HTML, TG_URL, telegramProfile, {}, {},
+    (w) => (wk = fakeWebK(w, { names: NAMES, myId: ME, uncached: ['Spam 3'] })));
+  await sleep(700);
+  assert(!wk.calls.reloaded.length, 'loaded chats for a disabled rule');
+});
 
 console.log('\n-- telegram focus lock --');
 const guard = (d) => d.window.document.getElementById('__unhook_guard');
@@ -703,6 +783,7 @@ function lockBoot(open, enabled = LOCK, params = {}, opts = {}) {
   const d = boot(TG_HTML, TG_URL, telegramProfile, enabled, params, (w) => {
     wk = fakeWebK(w, { names: NAMES, myId: ME, folder: FOLDER, ...opts });
     w.appImManager.chat.peerId = wk.id(open);
+    w.appImManager.tabId = 1;
     if (opts.setup) opts.setup(w, wk);
   });
   return { d, wk };
@@ -725,6 +806,16 @@ check('membership falls back to filtersStorage for an unloaded folder', async ()
   const { d } = lockBoot('Spam 7', LOCK, {}, { setup: (w) => delete w.appDialogsManager.xds[5] });
   await sleep(250);
   assert(guard(d), 'no overlay without a loaded folder list');
+});
+
+check('an uncached chat on the folder list is left alone', async () => {
+  const { d } = lockBoot('Spam 7', LOCK, {}, {
+    uncached: ['Spam 7'],
+    // Keep it uncached so only the explicit list can vouch for it.
+    setup: (w) => (w.appDialogsManager.managers.appMessagesManager.reloadConversation = () => Promise.resolve()),
+  });
+  await sleep(250);
+  assert(!guard(d), 'covered a chat that is in the folder');
 });
 
 check('a hidden name is blocked even inside the folder', async () => {
@@ -781,6 +872,53 @@ check('"Back to focus" closes the chat', async () => {
   guard(d).querySelector('button').click();
   assert(!guard(d), 'overlay survived the button');
   assert(JSON.stringify(wk.calls.setPeer) === '[0]', 'chat not closed: ' + JSON.stringify(wk.calls.setPeer));
+});
+
+check('a chat left open behind the list is not judged (mobile)', async () => {
+  const { d } = lockBoot('Spam 7', LOCK, {}, { mobile: true });
+  await sleep(250);
+  assert(guard(d), 'setup: overlay should be up');
+  // Telegram's own back arrow on a phone: back to the list, peerId unchanged.
+  d.window.appImManager.tabId = 0;
+  await sleep(250);
+  assert(!guard(d), 'overlay stayed over the chat list');
+  // A settings change re-checks with force; the stale chat must stay ignored.
+  d.window.eval(buildApplyCall(telegramProfile, { ...LOCK, 'hide-folder-tabs': true }));
+  await sleep(250);
+  assert(!guard(d), 'settings change put the overlay back over the list');
+});
+
+check('"Back to focus" does not trap the user on mobile', async () => {
+  const { d, wk } = lockBoot('Spam 7', LOCK, {}, { mobile: true });
+  await sleep(250);
+  guard(d).querySelector('button').click();
+  await sleep(300);
+  assert(d.window.appImManager.chat.peerId === wk.id('Spam 7'), 'setup: fake should keep the peer');
+  assert(!guard(d), 'overlay came back over the chat list');
+});
+
+check('reopening the same blocked chat is covered again', async () => {
+  const { d } = lockBoot('Spam 7', LOCK, {}, { mobile: true });
+  await sleep(250);
+  d.window.appImManager.tabId = 0;
+  await sleep(250);
+  d.window.appImManager.tabId = 1;
+  await sleep(250);
+  assert(guard(d), 'blocked chat got through on the second visit');
+});
+
+check('the overlay starts below the chat header', async () => {
+  const { d } = lockBoot('Spam 7', LOCK, {}, {
+    setup: (w) => {
+      const doc = w.document;
+      const rect = (top, height) => () => ({ top, left: 0, width: 400, height, bottom: top + height });
+      doc.querySelector('.bubbles').getBoundingClientRect = rect(0, 800);
+      doc.querySelector('.topbar').getBoundingClientRect = rect(0, 56);
+    },
+  });
+  await sleep(250);
+  const s = guard(d).style;
+  assert(s.top === '56px' && s.height === '744px', `covers the header: top ${s.top}, height ${s.height}`);
 });
 
 check('the overlay goes away when the lock is switched off', async () => {
