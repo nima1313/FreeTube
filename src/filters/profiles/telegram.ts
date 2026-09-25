@@ -1,16 +1,18 @@
 import { SiteProfile } from '../types';
 
-// Pinned to WebK (/k/). Telegram Web ships two clients — WebK and WebA (/a/) —
-// with different markup, and pinning one keeps the selectors predictable. WebK
-// also has the more stable hooks: #column-left, .chatlist-chat and
-// #folders-container survive updates in a way WebA's React class names do not.
-// WebA selectors are listed anyway as harmless fallbacks, matching the
-// redundancy policy in youtube.ts.
+// Telegram Web K (/k/) only. Ported from the unhookTelegram extension, whose
+// selectors were verified against the live WebK DOM. WebA (/a/) has different
+// markup and none of the internals below, so the app is kept off it entirely.
+//
+// WebK's chat list is virtual — only on-screen rows exist in the DOM — so the
+// chat-name filters and the focus lock work on WebK's own data instead
+// (window.appDialogsManager, apiManagerProxy, appImManager, rootScope). If a
+// Telegram update renames those, the three rules stop working (a warning is
+// posted) while the CSS rules carry on.
 //
 // NOTE: Telegram Web is hash-routed (/k/#-1001234), so location.pathname is
-// always "/k/". Every path-based mechanism in this codebase — pathScope,
-// redirect, blockPathPattern — is therefore inert here by construction. Rules
-// are CSS and jsAction only; do not reach for a redirect, it will not fire.
+// always "/k/" once inside the app. pathScope and blockPathPattern are inert
+// here; the one path that does exist is /a/, which stay-on-webk redirects.
 //
 // Expect to edit this file as Telegram ships markup changes. Use the debug
 // outline mode in Settings plus chrome://inspect to spot dead selectors.
@@ -29,37 +31,26 @@ export const telegramProfile: SiteProfile = {
       label: 'Hide stories',
       description: 'The story ribbon above the chat list',
       enabledByDefault: true,
-      css: ['.stories-list', '#stories-container', '.StoryRibbon', '.StoryToggler'],
+      css: ['#column-left .stories-list'],
     },
     {
       id: 'hide-search',
       label: 'Hide the search bar',
       enabledByDefault: true,
-      css: [
-        '#column-left .input-search',
-        // The input alone leaves its rounded wrapper behind as an empty bar, so
-        // take the wrapper too. The extension this is ported from had to do
-        // this in JS; :has() makes it a selector here.
-        '#column-left div:has(> .input-search)',
-        '#LeftMainHeader .SearchInput',
-        '#LeftColumn div:has(> input[type="search"])',
-      ],
+      // .input-search is WebK's rounded wrapper, not the <input> inside it, so
+      // this takes the whole bar with it.
+      css: ['#column-left .sidebar-header .input-search'],
     },
     {
       id: 'hide-folder-tabs',
       label: 'Hide folder tabs',
       description: 'The All / Personal / Groups strip',
       enabledByDefault: false,
-      // Stays on screen until the focus-folder click lands — a display:none tab
-      // cannot be clicked. See deferUntil in ../types.ts.
-      deferUntil: 'focusFolder',
+      // Safe alongside focus-folder: WebK's tab still switches folders when
+      // clicked while hidden.
       css: [
-        '#folders-container',
-        '.folders-tabs-scrollable',
-        '.folders-tabs',
-        '.chatlist-parts .menu-horizontal-scrollable',
-        '.ChatFolders .TabList',
-        '#LeftColumn .TabList',
+        '#column-left .folders-tabs-scrollable',
+        '#column-left .folders-tabs-gradient-container',
       ],
     },
     {
@@ -67,11 +58,10 @@ export const telegramProfile: SiteProfile = {
       label: 'Hide the menu button',
       description: 'The hamburger that opens settings',
       enabledByDefault: false,
+      // The hamburger only; its sibling back-arrow stays usable during search.
       css: [
-        '.sidebar-header .btn-menu-toggle',
-        '#column-left .sidebar-header .btn-menu',
-        '#LeftMainHeader .DropdownMenu',
-        '#LeftColumn .DropdownMenu.main-menu',
+        '#column-left .left-sidebar-burger .btn-menu-toggle',
+        '#column-left .left-sidebar-burger .animated-menu-icon',
       ],
     },
     {
@@ -79,14 +69,41 @@ export const telegramProfile: SiteProfile = {
       label: 'Hide the new-chat button',
       description: 'The floating pencil',
       enabledByDefault: false,
-      css: ['#new-menu', '.btn-corner', '.NewChatButton', '#LeftColumn .FloatingActionButton'],
+      css: ['#new-menu'],
     },
     {
       id: 'hide-chat-list',
       label: 'Hide the whole chat list',
       description: 'Total focus — only a chat you are already in stays readable',
       enabledByDefault: false,
-      css: ['#chatlist-container', '.chatlist-container', '#column-left .chatlist', '.chat-list', '#LeftColumn .ChatList'],
+      // #folders-container holds one chat list per folder. Not
+      // .chatlist-container — WebK puts that class on the whole left column.
+      css: ['#folders-container'],
+    },
+    {
+      id: 'show-only-chats',
+      label: 'Show only these chats',
+      description:
+        'Hide every chat whose name does not contain one of these words. "saved messages" matches Saved Messages',
+      enabledByDefault: false,
+      jsAction: 'chatWhitelist',
+      param: {
+        label: 'Chat names, comma-separated',
+        placeholder: 'family, work',
+        defaultValue: '',
+      },
+    },
+    {
+      id: 'hide-chats',
+      label: 'Hide chats by name',
+      description: 'Hide any chat whose name contains one of these words',
+      enabledByDefault: false,
+      jsAction: 'chatBlacklist',
+      param: {
+        label: 'Chat names, comma-separated',
+        placeholder: 'news, crypto',
+        defaultValue: '',
+      },
     },
     {
       id: 'focus-folder',
@@ -105,14 +122,23 @@ export const telegramProfile: SiteProfile = {
     },
     {
       id: 'focus-lock',
-      label: 'Block chats outside that folder',
+      label: 'Block other chats',
       description:
-        'Covers any chat your list is not offering — stops channel links inside messages from getting around the filter',
+        'Covers any chat outside your focus folder (when on) or your "show only" list (when on), and any hidden chat — stops links inside messages from getting around the filter',
       // Off by default, for the same reason hide-app-banner is in instagram.ts:
       // a rule that can put an overlay over the app ships off until it has been
       // checked on a device.
       enabledByDefault: false,
       jsAction: 'focusLock',
+    },
+    {
+      id: 'stay-on-webk',
+      label: 'Stay on Telegram Web K',
+      description: 'Sends the "Switch to A version" link back here; the filters only work on Web K',
+      enabledByDefault: true,
+      // /a/ is a real pathname, unlike the hash routes inside the app, so this
+      // redirect does fire.
+      redirect: { from: '^/a(/|$)', to: '/k/' },
     },
   ],
 };

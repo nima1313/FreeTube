@@ -1,4 +1,9 @@
-export type JsAction = 'disableAutoplay' | 'focusFolder' | 'focusLock';
+export type JsAction =
+  | 'disableAutoplay'
+  | 'focusFolder'
+  | 'focusLock'
+  | 'chatWhitelist'
+  | 'chatBlacklist';
 
 /**
  * A user-editable string owned by one rule — rendered as a TextInput in
@@ -59,16 +64,6 @@ export interface FilterRule {
   /** User-editable string for this rule; see RuleParam. */
   param?: RuleParam;
   /**
-   * Holds this rule's CSS back until the named jsAction reports success.
-   *
-   * Exists for one real conflict: "hide folder tabs" and "focus folder" are
-   * both useful, but clicking a display:none tab cannot switch folders, so the
-   * tab bar has to survive until the focus click lands. Declaring the
-   * dependency here keeps the shared bootstrap free of profile-specific rule
-   * ids.
-   */
-  deferUntil?: JsAction;
-  /**
    * Regex source matched against a URL's pathname. While the rule is enabled,
    * both main-frame loads and in-page link taps matching it are blocked.
    */
@@ -106,7 +101,6 @@ export interface InjectedRule {
   jsAction?: JsAction;
   /** Resolved value — the user's text, or the rule's default. */
   param?: string;
-  deferUntil?: JsAction;
   blockPathPattern?: string;
   pathScope?: string;
   enabled: boolean;

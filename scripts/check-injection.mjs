@@ -76,16 +76,19 @@ function check(name, fn) {
 function assert(cond, msg) {
   if (!cond) throw new Error(msg);
 }
-// Telegram's focus-folder retry loop settles over ~1.4s of real time, so those
-// assertions have to wait for it rather than run inline.
+// Telegram's focus-folder loop, chat-filter patch and focus lock all run on
+// timers, so those assertions have to wait for them rather than run inline.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const { JSDOM } = require('jsdom');
-function boot(html, url, profile, enabledMap = {}, paramMap = {}) {
+// setup(window) runs before the bootstrap, for fixtures that must already be
+// in place when it boots (Telegram's fake internals, click listeners).
+function boot(html, url, profile, enabledMap = {}, paramMap = {}, setup) {
   const dom = new JSDOM(html, { url, runScripts: 'outside-only', pretendToBeVisual: true });
   const { window } = dom;
   const posted = [];
   window.ReactNativeWebView = { postMessage: (s) => posted.push(JSON.parse(s)) };
+  if (setup) setup(window);
   window.eval(buildBootstrap(profile, enabledMap, paramMap));
   const css = () => window.document.getElementById('__unhook_css').textContent;
   return { window, posted, css };
@@ -422,124 +425,370 @@ check('focus-folder ships its default, and a stored value overrides it', () => {
 });
 
 console.log('\n-- telegram bootstrap behavior in jsdom --');
-// Telegram Web is hash-routed, so pathname is always "/k/" and every path-based
-// mechanism in the codebase is inert here. These fixtures use WebK markup.
-const TG_CHATS =
-  '<div id="folders-container">' +
-  '<div class="menu-horizontal-div-item" id="tab-all">All</div>' +
-  // Trailing unread count: baseLabel has to strip it or nothing matches.
-  '<div class="menu-horizontal-div-item" id="tab-focus">focus mode 3</div>' +
-  '</div>' +
-  '<ul class="chatlist">' +
-  '<a class="chatlist-chat" id="c1"><span class="peer-title">Family</span></a>' +
-  '<a class="chatlist-chat" id="c2"><span class="peer-title">Work</span></a>' +
-  '</ul>';
-const tgHtml = (title, body) =>
-  '<html><head><title>' + title + '</title></head><body>' +
-  '<div id="column-left">' + body + '</div><div id="column-center"></div>' +
+// Telegram Web is hash-routed, so pathname is always "/k/" inside the app.
+// These fixtures use WebK markup, and fakeWebK stands in for the internals the
+// chat filter and focus lock read (appDialogsManager, apiManagerProxy,
+// appImManager, rootScope).
+const TG_URL = 'https://web.telegram.org/k/';
+const TG_TABS =
+  '<div class="folders-tabs-scrollable"><nav id="folders-tabs">' +
+  '<div class="menu-horizontal-div-item active" data-filter-id="0" id="tab-all">' +
+  '<span class="text-super">All</span></div>' +
+  // The unread badge is a sibling of the label, so it must not break matching.
+  '<div class="menu-horizontal-div-item" data-filter-id="5" id="tab-focus">' +
+  '<span class="text-super">Focus Mode</span><div class="badge">3</div></div>' +
+  '</nav></div>';
+const TG_HTML =
+  '<html><head></head><body>' +
+  '<div id="column-left">' + TG_TABS + '<div id="folders-container"></div></div>' +
+  '<div id="column-center"><div class="chat active"><div class="bubbles"></div></div></div>' +
   '</body></html>';
 
-const TG_URL = 'https://web.telegram.org/k/';
+// Folder tabs switch like WebK's: the clicked one becomes .active.
+function wireTabs(window, clicks) {
+  const tabs = window.document.querySelectorAll('.menu-horizontal-div-item');
+  for (const tab of tabs) {
+    tab.addEventListener('click', () => {
+      clicks[tab.id] = (clicks[tab.id] || 0) + 1;
+      for (const t of tabs) t.classList.toggle('active', t === tab);
+    });
+  }
+}
 
-const tg = boot(tgHtml('Telegram', TG_CHATS), TG_URL, telegramProfile, {
-  'focus-folder': true,
-  'hide-folder-tabs': true,
-});
-// Attached after boot, so it misses the first (synchronous) click and sees the
-// rest — enough to prove the loop targets the right tab.
-const tgClicks = { focus: 0, all: 0 };
-tg.window.document.getElementById('tab-focus').addEventListener('click', () => tgClicks.focus++);
-tg.window.document.getElementById('tab-all').addEventListener('click', () => tgClicks.all++);
-
-check('folder-tab CSS is deferred while the focus click is still landing', () =>
-  assert(!tg.css().includes('#folders-container'),
-    'tab bar hidden before the click landed — the click can never work'));
-
-await sleep(2400);
-
-check('focus folder reports success', () => {
-  const hit = tg.posted.find((m) => m.what === 'focus-folder');
-  assert(hit, 'no success posted: ' + JSON.stringify(tg.posted));
-  assert(hit.name === 'focus mode', 'unread count not stripped from the tab label: ' + hit.name);
-});
-check('the focus tab was clicked and All was left alone', () =>
-  assert(tgClicks.focus > 0 && tgClicks.all === 0, JSON.stringify(tgClicks)));
-check('folder-tab CSS applies once the click has landed', () =>
-  assert(tg.css().includes('#folders-container'), 'tab bar never hidden after the click'));
-
-check('disabling focus-folder releases the deferred CSS immediately', () => {
-  const off = boot(tgHtml('Telegram', TG_CHATS), TG_URL, telegramProfile, {
-    'focus-folder': false,
-    'hide-folder-tabs': true,
+// Dialogs are numbered 1..n in list order, with WebK's descending index keys:
+// index_0 for All, index_5 for the "focus mode" folder's members.
+function fakeWebK(window, { names, folder = [], myId, openPeer = 0 }) {
+  const dialogs = names.map((name, i) => {
+    const d = { peerId: i + 1, index_0: 100000 - i };
+    if (folder.includes(name)) d.index_5 = 100000 - i;
+    return d;
   });
-  assert(off.css().includes('#folders-container'),
-    'tab bar still deferred with nothing left to wait for');
+  const calls = { fetches: 0, fullResets: 0, otherResets: 0, setPeer: [] };
+  // Methods live on a base class, as in WebK, and the lists are a subclass:
+  // the patch has to land on the base for every list to go through it.
+  class BaseList {
+    dialogsFetcher(offsetIndex, limit) {
+      calls.fetches++;
+      const own = dialogs.filter((d) => d[this.indexKey] !== undefined);
+      let from = 0;
+      if (offsetIndex != null) {
+        from = own.findIndex((d) => d[this.indexKey] < offsetIndex);
+        if (from === -1) from = own.length;
+      }
+      const page = own.slice(from, from + limit);
+      return Promise.resolve({ dialogs: page, count: own.length, isEnd: from + limit >= own.length });
+    }
+    canUpdateDialog() {
+      return true;
+    }
+  }
+  // WebK's lists override the fetcher and call super, so wrapping the first
+  // owner found would only catch this subclass; ArchiveList proves the base
+  // was patched.
+  class FolderList extends BaseList {
+    dialogsFetcher(offsetIndex, limit) {
+      return super.dialogsFetcher(offsetIndex, limit);
+    }
+  }
+  class ArchiveList extends BaseList {}
+  const xd = new FolderList();
+  xd.indexKey = 'index_0';
+  xd.fullReset = () => {
+    calls.fullResets++;
+    return Promise.resolve();
+  };
+  const other = new ArchiveList();
+  other.indexKey = 'index_5';
+  other.reset = () => calls.otherResets++;
+  other.clear = () => {};
+  window.appDialogsManager = {
+    xd,
+    xds: { 0: xd, 5: other },
+    managers: {
+      appMessagesManager: {
+        getDialogOnly: (peerId) => Promise.resolve(dialogs.find((d) => d.peerId === peerId)),
+      },
+      filtersStorage: { getFilter: (id) => Promise.resolve(id === 5 ? { localId: 5 } : undefined) },
+    },
+  };
+  window.apiManagerProxy = {
+    getPeer: (peerId) => {
+      const name = names[peerId - 1];
+      return peerId === myId ? { first_name: name } : { title: name };
+    },
+  };
+  window.rootScope = { myId };
+  window.appImManager = {
+    chat: { peerId: openPeer },
+    setPeer({ peerId }) {
+      calls.setPeer.push(peerId);
+      this.chat.peerId = peerId;
+    },
+  };
+  const id = (name) => names.indexOf(name) + 1;
+  return { xd, other, dialogs, calls, id };
+}
+
+// Pages through the (possibly patched) fetcher the way WebK's list does.
+async function listAll(xd, limit = 20) {
+  const seen = [];
+  let cursor;
+  let first;
+  for (;;) {
+    const res = await xd.dialogsFetcher(cursor, limit);
+    first = first || res;
+    seen.push(...res.dialogs);
+    if (res.isEnd || !res.dialogs.length) break;
+    cursor = res.dialogs[res.dialogs.length - 1][xd.indexKey];
+  }
+  return { seen, count: first.count };
+}
+
+console.log('\n-- telegram focus folder --');
+check('stay-on-webk sends WebA back to /k/', () => {
+  const d = boot(TG_HTML, 'https://web.telegram.org/a/', telegramProfile);
+  const hit = d.posted.find((m) => m.type === 'redirect');
+  assert(hit && hit.rule === 'stay-on-webk' && hit.to === '/k/', JSON.stringify(d.posted));
+});
+check('/k/ itself is not redirected', () => {
+  const d = boot(TG_HTML, TG_URL, telegramProfile);
+  assert(!d.posted.some((m) => m.type === 'redirect'), JSON.stringify(d.posted));
 });
 
-// A folder that cannot be found keeps retrying for the full ~9s budget before
-// giving up, which is too slow to assert on directly. The consequence that
-// matters is testable immediately, and it is the right failure mode: if the
-// folder never appears, the tab bar stays put so the user can still navigate.
-check('a folder that is never found leaves the tab bar alone', async () => {
-  const miss = boot(tgHtml('Telegram', TG_CHATS), TG_URL, telegramProfile,
-    { 'focus-folder': true, 'hide-folder-tabs': true }, { 'focus-folder': 'no such folder' });
-  await sleep(600);
-  assert(!miss.css().includes('#folders-container'),
-    'tab bar hidden even though the folder was never opened');
-  assert(!miss.posted.some((m) => m.what === 'focus-folder'),
-    'reported success without finding the folder');
+check('folder-tab CSS applies right away, even with focus-folder on', () => {
+  const d = boot(TG_HTML, TG_URL, telegramProfile, { 'focus-folder': true, 'hide-folder-tabs': true });
+  assert(d.css().includes('.folders-tabs-scrollable'), 'tab bar CSS withheld');
 });
+
+check('the focus tab is clicked, settles, and reports success', async () => {
+  const clicks = {};
+  const d = boot(TG_HTML, TG_URL, telegramProfile,
+    { 'focus-folder': true, 'hide-folder-tabs': true }, {}, (w) => wireTabs(w, clicks));
+  // The first click lands at once, but success waits for three settled ticks
+  // (~1.2s) — Telegram may still restore the previous folder before then.
+  await sleep(700);
+  assert(!d.posted.some((m) => m.what === 'focus-folder'), 'success reported before the folder settled');
+  await sleep(1100);
+  const hit = d.posted.find((m) => m.what === 'focus-folder');
+  assert(hit && hit.name === 'focus mode', 'no success posted: ' + JSON.stringify(d.posted));
+  assert(clicks['tab-focus'] >= 1 && !clicks['tab-all'], JSON.stringify(clicks));
+  assert(d.window.document.getElementById('tab-focus').classList.contains('active'), 'folder not open');
+});
+
+check('the folder is re-opened when Telegram restores the last one', async () => {
+  const clicks = {};
+  const d = boot(TG_HTML, TG_URL, telegramProfile, { 'focus-folder': true }, {}, (w) => wireTabs(w, clicks));
+  await sleep(100);
+  // What Telegram does a beat after load: put the previously open folder back.
+  d.window.document.getElementById('tab-all').click();
+  await sleep(2000);
+  assert(clicks['tab-focus'] >= 2, 'restored folder was not fought: ' + JSON.stringify(clicks));
+  assert(d.window.document.getElementById('tab-focus').classList.contains('active'), 'folder not open');
+});
+
+check('a folder that does not exist is never faked', async () => {
+  const clicks = {};
+  const d = boot(TG_HTML, TG_URL, telegramProfile, { 'focus-folder': true },
+    { 'focus-folder': 'no such folder' }, (w) => wireTabs(w, clicks));
+  await sleep(600);
+  assert(!Object.keys(clicks).length, 'clicked a tab: ' + JSON.stringify(clicks));
+  assert(!d.posted.some((m) => m.what === 'focus-folder'), 'reported success without the folder');
+});
+
+console.log('\n-- telegram chat-name filter --');
+// 250 chats, so a correct scan has to page past the first 100.
+const NAMES = ['Family', 'Me'];
+for (let i = 0; i < 250; i++) NAMES.push('Spam ' + i);
+NAMES.splice(200, 0, 'Work chat');
+const ME = NAMES.indexOf('Me') + 1;
+const WHITELIST = { 'show-only-chats': true };
+
+check('chat-name params default to empty', () => {
+  const js = buildBootstrap(telegramProfile, {});
+  assert(js.includes('"id":"show-only-chats"') && js.includes('"id":"hide-chats"'), 'rules missing');
+  assert(js.includes('"param":"","enabled":false'), 'default not empty');
+});
+
+check('whitelist serves a gap-free list of only the matches', async () => {
+  let wk;
+  const d = boot(TG_HTML, TG_URL, telegramProfile, WHITELIST, { 'show-only-chats': 'family, WORK' },
+    (w) => (wk = fakeWebK(w, { names: NAMES, myId: ME })));
+  // Past the 300ms and 1200ms boot() re-runs, which must not reload the list.
+  await sleep(1400);
+  const { seen, count } = await listAll(wk.xd, 1);
+  const titles = seen.map((x) => NAMES[x.peerId - 1]);
+  assert(JSON.stringify(titles) === '["Family","Work chat"]', 'got ' + JSON.stringify(titles));
+  assert(count === 2, 'count should be the filtered total, got ' + count);
+  assert(wk.calls.fullResets === 1 && wk.calls.otherResets === 1, JSON.stringify(wk.calls));
+  const root = d.window.document.documentElement;
+  assert(root.hasAttribute('data-unhook-tg-filtering'), 'filtering flag missing');
+  assert(!root.hasAttribute('data-unhook-tg-loading'), 'list left hidden after reload');
+  assert(d.css().includes('html[data-unhook-tg-loading] #folders-container'), 'flag CSS missing');
+});
+
+check('every folder list is filtered, not just the open one', async () => {
+  let wk;
+  boot(TG_HTML, TG_URL, telegramProfile, WHITELIST, { 'show-only-chats': 'family' },
+    (w) => (wk = fakeWebK(w, { names: NAMES, myId: ME, folder: ['Family', 'Spam 1'] })));
+  await sleep(200);
+  const { seen } = await listAll(wk.other);
+  assert(seen.length === 1 && seen[0].peerId === wk.id('Family'), JSON.stringify(seen));
+  assert(wk.other.canUpdateDialog({ peerId: wk.id('Spam 1') }) === false, 'live update got through');
+});
+
+check('the whole list is scanned once, not per page', async () => {
+  let wk;
+  boot(TG_HTML, TG_URL, telegramProfile, WHITELIST, { 'show-only-chats': 'work' },
+    (w) => (wk = fakeWebK(w, { names: NAMES, myId: ME })));
+  await sleep(200);
+  await listAll(wk.xd, 1);
+  const afterFirst = wk.calls.fetches;
+  assert(afterFirst === 3, `expected 3 pages of 100 for 253 chats, got ${afterFirst}`);
+  await listAll(wk.xd, 1);
+  assert(wk.calls.fetches === afterFirst, `re-scanned: ${wk.calls.fetches - afterFirst} extra fetches`);
+});
+
+check('blacklist removes matches and blocks live updates', async () => {
+  let wk;
+  boot(TG_HTML, TG_URL, telegramProfile, { 'hide-chats': true }, { 'hide-chats': 'spam' },
+    (w) => (wk = fakeWebK(w, { names: NAMES, myId: ME })));
+  await sleep(200);
+  const { seen, count } = await listAll(wk.xd, 50);
+  assert(count === 3 && seen.length === 3, `expected Family, Me, Work chat; got ${count}`);
+  assert(wk.xd.canUpdateDialog({ peerId: wk.id('Spam 3') }) === false, 'a hidden chat got a live update');
+  assert(wk.xd.canUpdateDialog({ peerId: wk.id('Family') }) === true, 'an allowed chat was frozen');
+});
+
+check('"saved messages" matches your own chat', async () => {
+  let wk;
+  boot(TG_HTML, TG_URL, telegramProfile, WHITELIST, { 'show-only-chats': 'saved messages' },
+    (w) => (wk = fakeWebK(w, { names: NAMES, myId: ME })));
+  await sleep(200);
+  const { seen } = await listAll(wk.xd);
+  assert(seen.length === 1 && seen[0].peerId === ME, JSON.stringify(seen));
+});
+
+check('switching the filter off restores the full list', async () => {
+  let wk;
+  const d = boot(TG_HTML, TG_URL, telegramProfile, WHITELIST, { 'show-only-chats': 'family' },
+    (w) => (wk = fakeWebK(w, { names: NAMES, myId: ME })));
+  await sleep(200);
+  d.window.eval(buildApplyCall(telegramProfile, {}, { 'show-only-chats': 'family' }));
+  await sleep(50);
+  const { count } = await listAll(wk.xd, 100);
+  assert(count === NAMES.length, `expected ${NAMES.length}, got ${count}`);
+  assert(wk.calls.fullResets === 2, 'list not reloaded on toggle: ' + wk.calls.fullResets);
+  assert(!d.window.document.documentElement.hasAttribute('data-unhook-tg-filtering'), 'flag left on');
+});
+
+check('the list stays hidden until WebK is ready, then filters', async () => {
+  const d = boot(TG_HTML, TG_URL, telegramProfile, WHITELIST, { 'show-only-chats': 'family' });
+  const root = d.window.document.documentElement;
+  assert(root.hasAttribute('data-unhook-tg-loading'), 'unfiltered list shown before the patch');
+  const wk = fakeWebK(d.window, { names: NAMES, myId: ME });
+  await sleep(200);
+  assert(!root.hasAttribute('data-unhook-tg-loading'), 'list never revealed');
+  assert((await listAll(wk.xd)).count === 1, 'late patch did not filter');
+});
+
+check('other profiles carry none of the chat filter', () =>
+  assert(!buildBootstrap(youtubeProfile, {}).includes('"jsAction":"chatWhitelist"'), 'leaked'));
 
 console.log('\n-- telegram focus lock --');
-const LOCK_ON = { 'focus-lock': true };
 const guard = (d) => d.window.document.getElementById('__unhook_guard');
+const LOCK = { 'focus-lock': true, 'focus-folder': true };
+const FOLDER = ['Family', 'Work chat'];
+function lockBoot(open, enabled = LOCK, params = {}, opts = {}) {
+  let wk;
+  const d = boot(TG_HTML, TG_URL, telegramProfile, enabled, params, (w) => {
+    wk = fakeWebK(w, { names: NAMES, myId: ME, folder: FOLDER, ...opts });
+    w.appImManager.chat.peerId = wk.id(open);
+    if (opts.setup) opts.setup(w, wk);
+  });
+  return { d, wk };
+}
 
-check('a chat the list never offered is covered', () => {
-  const d = boot(tgHtml('Spam Channel', TG_CHATS), TG_URL, telegramProfile, LOCK_ON);
+check('a chat outside the focus folder is covered', async () => {
+  const { d } = lockBoot('Spam 7');
+  await sleep(250);
   assert(guard(d), 'no overlay: ' + JSON.stringify(d.posted));
+  assert(d.posted.some((m) => m.what === 'focus-lock'), 'lock not reported');
 });
 
-check('a chat that is in the list is left alone', () => {
-  const d = boot(tgHtml('Family', TG_CHATS), TG_URL, telegramProfile, LOCK_ON);
-  assert(!guard(d), 'overlay covered an allowed chat');
+check('a chat in the folder is left alone', async () => {
+  const { d } = lockBoot('Work chat');
+  await sleep(250);
+  assert(!guard(d), 'overlay covered a folder chat');
 });
 
-check('the unread-count prefix is stripped from the open chat title', () => {
-  const d = boot(tgHtml('(3) Family', TG_CHATS), TG_URL, telegramProfile, LOCK_ON);
-  assert(!guard(d), 'an allowed chat was blocked because of its unread badge');
+check('membership falls back to filtersStorage for an unloaded folder', async () => {
+  const { d } = lockBoot('Spam 7', LOCK, {}, { setup: (w) => delete w.appDialogsManager.xds[5] });
+  await sleep(250);
+  assert(guard(d), 'no overlay without a loaded folder list');
 });
 
-// The regression the desktop extension has: it reads the allowed set live from
-// the visible chat list. On a phone Telegram is single-column, so opening a
-// chat takes that list away and the lock fails open exactly when it matters.
-check('the allowed set survives the chat list leaving the DOM', () => {
-  const d = boot(tgHtml('Family', TG_CHATS), TG_URL, telegramProfile, LOCK_ON);
-  assert(!guard(d), 'setup: allowed chat should not be covered');
-  d.window.document.querySelector('.chatlist').remove();
-  d.window.document.title = 'Spam Channel';
-  d.window.eval(buildApplyCall(telegramProfile, LOCK_ON));
-  assert(guard(d), 'lock failed open once the list was off-screen');
+check('a hidden name is blocked even inside the folder', async () => {
+  const { d } = lockBoot('Family', { ...LOCK, 'hide-chats': true }, { 'hide-chats': 'family' });
+  await sleep(250);
+  assert(guard(d), 'blacklisted folder chat got through');
 });
 
-check('fails open when no chat list has ever been seen', () => {
-  const d = boot(tgHtml('Spam Channel', ''), TG_URL, telegramProfile, LOCK_ON);
-  assert(!guard(d), 'user trapped behind an overlay with no way to populate the list');
+check('without a folder, the "show only" list decides', async () => {
+  const on = { 'focus-lock': true, 'show-only-chats': true };
+  const ok = lockBoot('Work chat', on, { 'show-only-chats': 'work' });
+  const bad = lockBoot('Spam 7', on, { 'show-only-chats': 'work' });
+  await sleep(250);
+  assert(!guard(ok.d), 'whitelisted chat covered');
+  assert(guard(bad.d), 'non-whitelisted chat got through');
 });
 
-check('the overlay goes away when the lock is switched off', () => {
-  const d = boot(tgHtml('Spam Channel', TG_CHATS), TG_URL, telegramProfile, LOCK_ON);
+check('with no focus set at all, nothing is blocked', async () => {
+  const { d } = lockBoot('Spam 7', { 'focus-lock': true });
+  await sleep(250);
+  assert(!guard(d), 'blocked a chat with nothing to compare against');
+});
+
+check('a folder that cannot be found fails open', async () => {
+  const { d } = lockBoot('Spam 7', LOCK, { 'focus-folder': 'no such folder' });
+  await sleep(250);
+  assert(!guard(d), 'user trapped by a renamed folder');
+});
+
+check('broken internals fail open', async () => {
+  const { d } = lockBoot('Spam 7', LOCK, {}, {
+    setup: (w) => {
+      w.appDialogsManager.managers.appMessagesManager.getDialogOnly = () => {
+        throw new Error('changed');
+      };
+    },
+  });
+  await sleep(250);
+  assert(!guard(d), 'user trapped by an internal error');
+});
+
+check('opening an allowed chat takes the overlay down', async () => {
+  const { d, wk } = lockBoot('Spam 7');
+  await sleep(250);
   assert(guard(d), 'setup: overlay should be up');
-  d.window.eval(buildApplyCall(telegramProfile, { 'focus-lock': false }));
-  assert(!guard(d), 'overlay survived the rule being disabled');
+  d.window.appImManager.chat.peerId = wk.id('Family');
+  await sleep(250);
+  assert(!guard(d), 'overlay stayed over an allowed chat');
 });
 
-check('hash navigation re-evaluates the lock', async () => {
-  const d = boot(tgHtml('Family', TG_CHATS), TG_URL, telegramProfile, LOCK_ON);
-  d.window.document.title = 'Spam Channel';
-  d.window.location.hash = '#-1001234';
-  // hashchange is dispatched from a queued task, not synchronously.
-  await sleep(50);
-  assert(guard(d), 'hashchange did not re-run the guard — Telegram routes only by hash');
+check('"Back to focus" closes the chat', async () => {
+  const { d, wk } = lockBoot('Spam 7');
+  await sleep(250);
+  guard(d).querySelector('button').click();
+  assert(!guard(d), 'overlay survived the button');
+  assert(JSON.stringify(wk.calls.setPeer) === '[0]', 'chat not closed: ' + JSON.stringify(wk.calls.setPeer));
+});
+
+check('the overlay goes away when the lock is switched off', async () => {
+  const { d } = lockBoot('Spam 7');
+  await sleep(250);
+  assert(guard(d), 'setup: overlay should be up');
+  d.window.eval(buildApplyCall(telegramProfile, { 'focus-folder': true }));
+  assert(!guard(d), 'overlay survived the rule being disabled');
 });
 
 console.log('\n-- shouldLoad navigation policy --');

@@ -29,7 +29,6 @@ function serializeRules(
     // param, which keeps the injected payload byte-identical for profiles that
     // have none.
     param: r.param ? paramMap[r.id] ?? r.param.defaultValue : undefined,
-    deferUntil: r.deferUntil,
     blockPathPattern: r.blockPathPattern,
     pathScope: r.pathScope,
     enabled: enabledMap[r.id] ?? r.enabledByDefault,

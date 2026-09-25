@@ -18,10 +18,6 @@ export const BOOTSTRAP_TEMPLATE = `
   var HIDE_ATTR = 'data-unhook-hide';
   var state = { rules: RULES, debug: false };
 
-  // jsAction name -> has it reported success yet this page load. Read by the
-  // deferUntil interlock in activeSelectors().
-  var succeeded = {};
-
   function ruleFor(action) {
     for (var i = 0; i < state.rules.length; i++) {
       if (state.rules[i].jsAction === action) return state.rules[i];
@@ -76,11 +72,6 @@ export const BOOTSTRAP_TEMPLATE = `
       var r = state.rules[i];
       if (!r.enabled || !r.css) continue;
       if (!inScope(r)) continue;
-      // deferUntil: hold this rule's CSS back until the jsAction it depends on
-      // has succeeded. Hiding Telegram's folder tabs before the focus-folder
-      // click lands would make the click impossible. Once the action is
-      // disabled entirely there is nothing to wait for, so the rule applies.
-      if (r.deferUntil && actionEnabled(r.deferUntil) && !succeeded[r.deferUntil]) continue;
       sels = sels.concat(r.css);
     }
     // Text-matched nodes ride the same stylesheet, so debug outlining and
@@ -96,7 +87,10 @@ export const BOOTSTRAP_TEMPLATE = `
     var decl = state.debug
       ? ' { outline: 2px solid red !important; outline-offset: -2px; }'
       : ' { display: none !important; }';
-    el.textContent = sels.join(',\\n') + decl;
+    // The chat filter's page flags ride along, and outside the debug swap:
+    // they toggle state rather than hide a filtered element.
+    var extra = ruleFor('chatWhitelist') || ruleFor('chatBlacklist') ? CHAT_FILTER_CSS : '';
+    el.textContent = sels.join(',\\n') + decl + extra;
   }
 
   // --- Redirects ------------------------------------------------------------
@@ -142,11 +136,10 @@ export const BOOTSTRAP_TEMPLATE = `
   function tooBigToHide(el) {
     if (!el || el === document.body || el === document.documentElement) return true;
     if (!el.contains) return false;
-    // Telegram Web has no <main> or landmark roles at all, so its column ids
-    // are listed too — without them the guard would have nothing to anchor on.
+    // Telegram Web K has no <main> or landmark roles at all, so its column
+    // ids are listed too — without them the guard would have nothing to anchor on.
     var anchors = document.querySelectorAll(
-      'main, [role="main"], [role="navigation"],' +
-        '#column-left, #column-center, #LeftColumn, #MiddleColumn'
+      'main, [role="main"], [role="navigation"], #column-left, #column-center'
     );
     for (var i = 0; i < anchors.length; i++) {
       if (el !== anchors[i] && el.contains(anchors[i])) return true;
@@ -198,9 +191,6 @@ export const BOOTSTRAP_TEMPLATE = `
     setTimeout(function () {
       scanPending = false;
       scanText();
-      // Rides the same debounce rather than adding a timer: the guard needs to
-      // re-evaluate on exactly the same mutations, and it is cheap when off.
-      applyGuard();
     }, 150);
   }
 
@@ -277,93 +267,55 @@ export const BOOTSTRAP_TEMPLATE = `
     }
   }, 1500);
 
-  // --- Focus folder ---------------------------------------------------------
-  // Telegram's own folders are the only dependable way to curate a chat list:
-  // the dialog list is virtualized, so filtering it in the DOM can never see
-  // more than what happens to be rendered. Instead we click the user's folder
-  // tab for them on load and let Telegram filter server-side.
-
-  var FOLDER_TAB_SELECTORS =
-    '.folders-tabs-scrollable .menu-horizontal-div-item,' +
-    '#folders-container .menu-horizontal-div-item,' +
-    '.menu-horizontal-div-item,' +
-    '.ChatFolders .Tab, .TabList .Tab, .Tab, [role="tab"]';
+  // --- Telegram Web K -------------------------------------------------------
+  // Ported from the unhookTelegram extension. WebK's chat list is virtual —
+  // only the on-screen rows are mounted — so anything that must see the whole
+  // list works on WebK's own data through the globals it exposes
+  // (appDialogsManager, apiManagerProxy, appImManager, rootScope). Every entry
+  // point below is a no-op until those exist, and on the other profiles.
 
   function normLabel(s) {
     return String(s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
   }
 
-  // Folder tabs carry a trailing unread count ("focus mode 3"), which is not
-  // part of the name the user typed.
-  function baseLabel(s) {
-    return normLabel(s).replace(/\\s*\\d+$/, '').trim();
+  // A rule's comma-separated param as lowercase terms; empty while it is off.
+  function terms(action) {
+    if (!actionEnabled(action)) return [];
+    var parts = actionParam(action).split(',');
+    var out = [];
+    for (var i = 0; i < parts.length; i++) {
+      var t = normLabel(parts[i]);
+      if (t) out.push(t);
+    }
+    return out;
   }
 
+  function anyHit(title, list) {
+    for (var i = 0; i < list.length; i++) {
+      if (title.indexOf(list[i]) !== -1) return true;
+    }
+    return false;
+  }
+
+  // --- Focus folder ---------------------------------------------------------
+  // Telegram's own folders are the dependable way to curate a chat list, so
+  // this just opens the user's folder tab on load. WebK switches folders even
+  // when a hidden tab is clicked, so hide-folder-tabs can stay on throughout.
+
+  // Compares the .text-super label only; the unread badge is a sibling of it.
   function findFocusTab(name) {
-    var matches = [];
-    var nodes = document.querySelectorAll(FOLDER_TAB_SELECTORS);
-    for (var i = 0; i < nodes.length; i++) {
-      if (baseLabel(nodes[i].textContent) === name) matches.push(nodes[i]);
+    var tabs = document.querySelectorAll('#folders-tabs .menu-horizontal-div-item');
+    for (var i = 0; i < tabs.length; i++) {
+      var label = tabs[i].querySelector('.text-super');
+      if (label && normLabel(label.textContent) === name) return tabs[i];
     }
-    if (!matches.length) {
-      // Fallback for a renamed tab class: any small element carrying the label.
-      // The size cap excludes wrappers — a container holding the whole tab bar
-      // also "contains" the text, and clicking it does nothing.
-      var all = document.querySelectorAll('div,span,a,li,button');
-      for (var j = 0; j < all.length; j++) {
-        if (all[j].getElementsByTagName('*').length > 8) continue;
-        if (baseLabel(all[j].textContent) === name) matches.push(all[j]);
-      }
-    }
-    if (!matches.length) return null;
-
-    // Smallest match is the tab itself rather than something wrapping it.
-    var best = null;
-    var bestArea = Infinity;
-    for (var k = 0; k < matches.length; k++) {
-      var r = matches[k].getBoundingClientRect();
-      if (!r || !r.width || !r.height) continue;
-      if (r.width * r.height < bestArea) {
-        best = matches[k];
-        bestArea = r.width * r.height;
-      }
-    }
-    // Every candidate reported a zero rect. That happens for real — a tab
-    // inside a content-visibility container measures as zero — so fall back to
-    // the first match instead of giving up on the feature entirely.
-    return best || matches[0];
+    return null;
   }
 
-  // Some builds switch folders on pointer/mouse events rather than a bare
-  // click(), so send the whole sequence.
-  function fireClick(el) {
-    var types = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
-    for (var i = 0; i < types.length; i++) {
-      var Ctor =
-        types[i].indexOf('pointer') === 0 && window.PointerEvent
-          ? window.PointerEvent
-          : window.MouseEvent;
-      try {
-        el.dispatchEvent(new Ctor(types[i], { bubbles: true, cancelable: true, view: window }));
-      } catch (e) {}
-    }
-  }
-
-  // React puts the handler on an ancestor, not on the text node that carries
-  // the label.
-  function clickableAncestor(el) {
-    var node = el;
-    for (var i = 0; i < 6 && node; i++) {
-      if (node.tagName === 'A' || node.tagName === 'BUTTON') return node;
-      if (node.getAttribute && node.getAttribute('role') === 'tab') return node;
-      try {
-        if (window.getComputedStyle(node).cursor === 'pointer') return node;
-      } catch (e) {}
-      node = node.parentElement;
-    }
-    return el;
-  }
-
+  var FOCUS_TICK_MS = 400;
+  var FOCUS_GIVE_UP_MS = 20000;
+  // Active this many ticks in a row counts as settled.
+  var FOCUS_STABLE_TICKS = 3;
   var focusTimer = null;
 
   function startFocusRetries() {
@@ -371,46 +323,43 @@ export const BOOTSTRAP_TEMPLATE = `
       clearTimeout(focusTimer);
       focusTimer = null;
     }
-    // Re-opening the folder means letting the tab bar back onto the screen
-    // first, or there would be nothing left to click.
-    succeeded.focusFolder = false;
-    applyCss();
     if (!actionEnabled('focusFolder')) return;
-
-    var name = baseLabel(actionParam('focusFolder'));
+    var name = normLabel(actionParam('focusFolder'));
     if (!name) return;
 
-    var attempts = 0;
-    var clicked = 0;
+    var started = Date.now();
+    var stable = 0;
+    var clicks = 0;
+    var seen = false;
 
+    // Keeps checking after the first click lands: Telegram restores the
+    // last-open folder a beat after load, which can undo an early click.
     function tick() {
       focusTimer = null;
       // Bail if the rule was switched off or the name edited mid-flight — a
       // stale loop would fight the folder the user has since chosen.
       if (!actionEnabled('focusFolder')) return;
-      if (baseLabel(actionParam('focusFolder')) !== name) return;
+      if (normLabel(actionParam('focusFolder')) !== name) return;
 
       var tab = findFocusTab(name);
-      if (tab) {
-        fireClick(clickableAncestor(tab));
-        clicked++;
+      if (tab) seen = true;
+      if (tab && tab.classList.contains('active')) {
+        if (++stable >= FOCUS_STABLE_TICKS) {
+          post({ type: 'action', what: 'focus-folder', name: name, clicks: clicks });
+          return;
+        }
+      } else {
+        stable = 0;
+        if (tab) {
+          tab.click();
+          clicks++;
+        }
       }
-      attempts++;
-
-      // Two races to beat: the client not having attached its handlers yet, and
-      // Telegram restoring the last-open folder a beat after the first click.
-      // Keep going until several land, or give up after ~9s.
-      if (clicked < 4 && attempts < 20) {
-        focusTimer = setTimeout(tick, 450);
+      if (Date.now() - started < FOCUS_GIVE_UP_MS) {
+        focusTimer = setTimeout(tick, FOCUS_TICK_MS);
         return;
       }
-      if (clicked > 0) {
-        succeeded.focusFolder = true;
-        applyCss();
-        post({ type: 'action', what: 'focus-folder', name: name, clicks: clicked });
-      } else {
-        post({ type: 'action', what: 'focus-folder-missing', name: name });
-      }
+      post({ type: 'action', what: seen ? 'focus-folder-stuck' : 'focus-folder-missing', name: name });
     }
 
     tick();
@@ -421,121 +370,325 @@ export const BOOTSTRAP_TEMPLATE = `
   // neither should re-fight the current folder.
   var lastFocusKey;
   function syncFocus() {
-    var key = actionEnabled('focusFolder') ? baseLabel(actionParam('focusFolder')) : null;
+    var key = actionEnabled('focusFolder') ? normLabel(actionParam('focusFolder')) : null;
     if (key === lastFocusKey) return;
     lastFocusKey = key;
     startFocusRetries();
   }
 
+  // --- Chat-name filter -----------------------------------------------------
+  // Hiding rows of a virtual list leaves gaps and never reaches rows that are
+  // not mounted, so this filters the data behind it instead. Every folder list
+  // pulls pages through dialogsFetcher(offset, limit) and takes live updates
+  // through canUpdateDialog(dialog). While a filter is active the fetcher scans
+  // the folder's whole list once and serves its pages out of the matches, so
+  // Telegram itself renders a normal, gap-free list.
+
+  var CHAT_PAGE_SIZE = 100;
+  // Stop scanning huge accounts after this many dialogs.
+  var CHAT_SCAN_CAP = 3000;
+  // One scan serves every page of a list. Dialog order shifts as messages
+  // arrive, hence the short lifetime.
+  var CHAT_CACHE_MS = 30000;
+  // Never keep the list hidden longer than this.
+  var CHAT_LOADING_MAX_MS = 8000;
+  var FILTERING_ATTR = 'data-unhook-tg-filtering';
+  var LOADING_ATTR = 'data-unhook-tg-loading';
+  var CHAT_FILTER_CSS =
+    '\\nhtml[' + FILTERING_ATTR + '] #column-left .sidebar-left-contacts-section' +
+    ' { display: none !important; }' +
+    '\\nhtml[' + LOADING_ATTR + '] #folders-container { visibility: hidden !important; }';
+
+  var chatFilter = { allow: [], block: [] };
+  var chatFilterKey = JSON.stringify(chatFilter);
+  var chatPatched = false;
+  var chatLoading = false;
+  var chatLoadingTimer = null;
+
+  function chatFiltering() {
+    return chatFilter.allow.length > 0 || chatFilter.block.length > 0;
+  }
+
+  function peerTitle(peerId) {
+    var proxy = window.apiManagerProxy;
+    var peer = null;
+    try {
+      peer = proxy && proxy.getPeer ? proxy.getPeer(peerId) : null;
+    } catch (e) {}
+    var title = '';
+    if (peer) {
+      title = peer.title || [peer.first_name, peer.last_name].filter(Boolean).join(' ');
+    }
+    var myId = window.rootScope && window.rootScope.myId;
+    if (myId !== undefined && String(peerId) === String(myId)) title += ' saved messages';
+    return title.toLowerCase();
+  }
+
+  function chatAllowed(peerId) {
+    if (!chatFiltering()) return true;
+    var title = peerTitle(peerId);
+    if (chatFilter.allow.length && !anyHit(title, chatFilter.allow)) return false;
+    return !anyHit(title, chatFilter.block);
+  }
+
+  // The prototype deepest in the chain that owns name — the base class, so
+  // every folder list subclass (and its super calls) goes through the wrap.
+  function baseOwner(obj, name) {
+    var owner = null;
+    for (var p = Object.getPrototypeOf(obj); p && p !== Object.prototype; p = Object.getPrototypeOf(p)) {
+      if (Object.prototype.hasOwnProperty.call(p, name)) owner = p;
+    }
+    return owner;
+  }
+
+  // The folder's whole dialog list (up to the cap), keeping only matches, in
+  // Telegram's order (index descending).
+  function scanMatches(list, origFetch) {
+    var matches = [];
+    var scanned = 0;
+    function step(cursor) {
+      return Promise.resolve(origFetch.call(list, cursor, CHAT_PAGE_SIZE)).then(function (res) {
+        var page = (res && res.dialogs) || [];
+        scanned += page.length;
+        var next = Infinity;
+        for (var i = 0; i < page.length; i++) {
+          if (chatAllowed(page[i].peerId)) matches.push(page[i]);
+          var v = page[i][list.indexKey];
+          if (v !== undefined && v < next) next = v;
+        }
+        if (!res || res.isEnd || !page.length || scanned >= CHAT_SCAN_CAP) return matches;
+        if (!isFinite(next) || next === cursor) return matches;
+        return step(next);
+      });
+    }
+    return step(undefined);
+  }
+
+  // The virtual list drops far-away rows and re-fetches them by cursor, so
+  // every page must be a slice of the same filtered list.
+  var chatScans = new WeakMap();
+
+  function filteredDialogs(list, origFetch) {
+    var hit = chatScans.get(list);
+    if (hit && hit.key === chatFilterKey && Date.now() - hit.at < CHAT_CACHE_MS) {
+      return hit.promise;
+    }
+    var promise = scanMatches(list, origFetch);
+    var entry = { key: chatFilterKey, at: Date.now(), promise: promise };
+    chatScans.set(list, entry);
+    promise.catch(function () {
+      if (chatScans.get(list) === entry) chatScans.delete(list);
+    });
+    return promise;
+  }
+
+  function patchDialogs(xd) {
+    var fetchOwner = baseOwner(xd, 'dialogsFetcher');
+    var updateOwner = baseOwner(xd, 'canUpdateDialog');
+    if (!fetchOwner || !updateOwner) return false;
+
+    var origFetch = fetchOwner.dialogsFetcher;
+    fetchOwner.dialogsFetcher = function (offsetIndex, limit) {
+      if (!chatFiltering()) return Promise.resolve(origFetch.call(this, offsetIndex, limit));
+      // A normal page (dialogs after the cursor), but cut from the filtered
+      // list and with its size as the total — so the virtual list sizes and
+      // paginates exactly as if only the matches existed.
+      var self = this;
+      return filteredDialogs(self, origFetch).then(function (all) {
+        var from = 0;
+        if (offsetIndex != null) {
+          from = all.length;
+          for (var i = 0; i < all.length; i++) {
+            if (all[i][self.indexKey] < offsetIndex) {
+              from = i;
+              break;
+            }
+          }
+        }
+        var to = from + (limit || CHAT_PAGE_SIZE);
+        return {
+          dialogs: all.slice(from, to),
+          count: all.length,
+          isTopEnd: from === 0,
+          isEnd: to >= all.length,
+        };
+      });
+    };
+
+    var origCanUpdate = updateOwner.canUpdateDialog;
+    updateOwner.canUpdateDialog = function (dialog) {
+      if (dialog && !chatAllowed(dialog.peerId)) return false;
+      return origCanUpdate.call(this, dialog);
+    };
+    return true;
+  }
+
+  // Both flags live on <html>, which may not exist yet on the first call, so
+  // boot() re-applies them.
+  function syncChatFlags() {
+    var root = document.documentElement;
+    if (!root) return;
+    if (chatFiltering()) root.setAttribute(FILTERING_ATTR, '1');
+    else root.removeAttribute(FILTERING_ATTR);
+    if (chatLoading) root.setAttribute(LOADING_ATTR, '1');
+    else root.removeAttribute(LOADING_ATTR);
+  }
+
+  function setChatLoading(on) {
+    clearTimeout(chatLoadingTimer);
+    chatLoading = on;
+    if (on) {
+      chatLoadingTimer = setTimeout(function () {
+        setChatLoading(false);
+      }, CHAT_LOADING_MAX_MS);
+    }
+    syncChatFlags();
+  }
+
+  // Rebuild the lists with the current filter. The visible one reloads now;
+  // the others are just cleared and reload when their tab opens.
+  function refreshLists() {
+    var dm = window.appDialogsManager;
+    if (!dm || !dm.xds) return;
+    for (var id in dm.xds) {
+      var xd = dm.xds[id];
+      if (!xd || xd === dm.xd) continue;
+      try {
+        xd.reset();
+        xd.clear();
+      } catch (e) {
+        console.warn('[unhook] could not clear a chat list', e);
+      }
+    }
+    if (!dm.xd) return;
+    Promise.resolve()
+      .then(function () {
+        return dm.xd.fullReset();
+      })
+      .catch(function (e) {
+        console.warn('[unhook] chat list reload failed', e);
+      })
+      .then(function () {
+        setChatLoading(false);
+      });
+  }
+
+  function syncChatFilter() {
+    var next = { allow: terms('chatWhitelist'), block: terms('chatBlacklist') };
+    var key = JSON.stringify(next);
+    if (key === chatFilterKey) return;
+    var was = chatFiltering();
+    chatFilter = next;
+    chatFilterKey = key;
+    syncChatFlags();
+    if (!was && !chatFiltering()) return;
+    if (chatPatched) refreshLists();
+    // Keep the unfiltered list off screen until the patch lands and reloads it.
+    else if (chatFiltering()) setChatLoading(true);
+  }
+
+  // Patched even while both filters are off (the wrap passes straight
+  // through), so switching one on later needs no reload.
+  if (ruleFor('chatWhitelist') || ruleFor('chatBlacklist')) {
+    var chatPollStarted = Date.now();
+    var chatPoll = setInterval(function () {
+      var dm = window.appDialogsManager;
+      if (dm && dm.xd && window.apiManagerProxy) {
+        clearInterval(chatPoll);
+        chatPatched = patchDialogs(dm.xd);
+        if (!chatPatched) {
+          console.warn('[unhook] WebK internals changed; chat-name filtering is unavailable');
+          post({ type: 'action', what: 'chat-filter-unavailable' });
+          setChatLoading(false);
+          return;
+        }
+        if (chatFiltering()) refreshLists();
+      } else if (Date.now() - chatPollStarted > 60000) {
+        clearInterval(chatPoll);
+        setChatLoading(false);
+      }
+    }, 50);
+  }
+
   // --- Focus lock -----------------------------------------------------------
-  // Hiding entries in the chat list does not stop Telegram opening ANY chat in
-  // response to a link inside a message, which is the main way a curated view
-  // springs a leak. With the lock on, the title of the open chat is checked
-  // against what the list offered and covered over if it does not belong.
+  // The filters only shape the chat list; Telegram still opens any chat reached
+  // another way (a channel link in a message, a mention). With the lock on, the
+  // open chat is checked against Telegram's own data and covered unless it is
+  // in the focus set:
+  //   - in the focus folder (when focus-folder is on), or
+  //   - matching a "show only" name (when that rule is on),
+  //   - and never matching a "hide" name.
+  // With neither a folder nor a "show only" list, only hidden names are blocked.
 
   var GUARD_ID = '__unhook_guard';
-  var CHAT_ITEM_SELECTORS =
-    'a.chatlist-chat, .chatlist-chat, li.chatlist-chat, .ListItem.Chat, .chat-item-clickable';
-  var CHAT_TITLE_SELECTORS =
-    '.peer-title, .user-title, .info .title, .ChatInfo .title, .title span';
-  var OPEN_TITLE_SELECTORS =
-    '.chat-info .peer-title, .sidebar-header .peer-title, .topbar .peer-title,' +
-    '.MiddleHeader .info .title, .ChatInfo .info .title, .ChatInfo .title';
+  var GUARD_TICK_MS = 100;
+  // The peer the current verdict is for, and a token that discards stale
+  // async verdicts.
+  var guardPeer = null;
+  var guardToken = 0;
 
-  // offsetParent is the usual visibility test, but WebK hides the inactive
-  // folder's list with display:none on a container, which this reads directly.
-  // It is also the only one of the two that jsdom implements.
-  //
-  // getComputedStyle forces a style recalc and WebK keeps every folder's list
-  // in the DOM at once, so walking each row's ancestors unconditionally would
-  // mean hundreds of recalcs per scan. Rows in a list share ancestors, so the
-  // optional cache collapses a whole list down to one walk.
-  function isHidden(el, cache) {
-    var chain = [];
-    var node = el;
-    var hidden = false;
-    while (node && node.nodeType === 1) {
-      var seen = cache ? cache.get(node) : undefined;
-      if (seen !== undefined) {
-        hidden = seen;
-        break;
-      }
-      var s = null;
-      try {
-        s = window.getComputedStyle(node);
-      } catch (e) {}
-      if (s && (s.display === 'none' || s.visibility === 'hidden')) {
-        hidden = true;
-        break;
-      }
-      chain.push(node);
-      node = node.parentElement;
-    }
-    // Everything below the node that decided it inherits the same answer.
-    if (cache) {
-      for (var i = 0; i < chain.length; i++) cache.set(chain[i], hidden);
-    }
-    return hidden;
+  function openPeerId() {
+    var im = window.appImManager;
+    return (im && im.chat && im.chat.peerId) || 0;
   }
 
-  function chatTitle(item) {
-    var el = item.querySelector(CHAT_TITLE_SELECTORS);
-    return normLabel(el ? el.textContent : item.textContent);
+  // The folder's dialog index key (e.g. "index_5"): a dialog belongs to the
+  // folder exactly when it has a value under that key. Null if not found.
+  function folderIndexKey(name) {
+    var tab = findFocusTab(name);
+    if (!tab) return Promise.resolve(null);
+    var id = Number(tab.getAttribute('data-filter-id'));
+    var dm = window.appDialogsManager;
+    if (dm.xds && dm.xds[id]) return Promise.resolve(dm.xds[id].indexKey);
+    return Promise.resolve(dm.managers.filtersStorage.getFilter(id)).then(function (f) {
+      return f && f.localId !== undefined ? 'index_' + f.localId : null;
+    });
   }
 
-  // Titles from the last time a populated chat list was on screen. A snapshot
-  // rather than a live read because Telegram is single-column on a phone:
-  // opening a chat takes the list away, so reading it live would come back
-  // empty at exactly the moment the lock has a decision to make.
-  var lastKnownTitles = null;
-
-  function refreshKnownTitles() {
-    var items = document.querySelectorAll(CHAT_ITEM_SELECTORS);
-    // Deliberately unbounded: an incomplete set would block chats the user is
-    // allowed to read, which is a worse failure than the scan costing more.
-    var cache = typeof Map === 'function' ? new Map() : null;
-    var seen = [];
-    for (var i = 0; i < items.length; i++) {
-      if (isHidden(items[i], cache)) continue;
-      var t = chatTitle(items[i]);
-      if (t) seen.push(t);
-    }
-    if (seen.length) lastKnownTitles = seen;
-  }
-
-  function openChatTitle() {
-    // document.title is the one unambiguous signal both Telegram clients set,
-    // so it beats guessing at header markup that differs between them. The
-    // prefix is an unread count, as in "(3) Family".
-    var dt = String(document.title || '').replace(/^\\(\\d+\\)\\s*/, '').trim();
-    if (dt && dt.toLowerCase() !== 'telegram') return dt;
-
-    var nodes = document.querySelectorAll(OPEN_TITLE_SELECTORS);
-    for (var i = 0; i < nodes.length; i++) {
-      if (isHidden(nodes[i])) continue;
-      var t = String(nodes[i].textContent || '').trim();
-      if (t) return t;
-    }
-    return '';
-  }
-
-  function isChatAllowed(title) {
-    var name = normLabel(title);
-    if (!name) return true;
-    var titles = lastKnownTitles || [];
-    for (var i = 0; i < titles.length; i++) {
-      // Either direction counts: the list truncates long names and the header
-      // adds status suffixes, so neither side is reliably the whole string.
-      if (titles[i] && (name.indexOf(titles[i]) !== -1 || titles[i].indexOf(name) !== -1)) {
-        return true;
-      }
-    }
-    return false;
+  function guardAllows(peerId) {
+    var title = peerTitle(peerId);
+    if (anyHit(title, terms('chatBlacklist'))) return false;
+    var allow = terms('chatWhitelist');
+    var folder = actionEnabled('focusFolder') ? normLabel(actionParam('focusFolder')) : '';
+    if (allow.length && anyHit(title, allow)) return true;
+    if (!folder) return !allow.length;
+    return folderIndexKey(folder).then(function (key) {
+      // Folder not found (renamed, or not loaded yet): fail open.
+      if (!key) return true;
+      return Promise.resolve(
+        window.appDialogsManager.managers.appMessagesManager.getDialogOnly(peerId)
+      ).then(function (dialog) {
+        return !!dialog && dialog[key] !== undefined;
+      });
+    });
   }
 
   function removeGuard() {
     var ov = document.getElementById(GUARD_ID);
     if (ov && ov.parentNode) ov.parentNode.removeChild(ov);
+  }
+
+  // Covers the open chat's message area only, which leaves Telegram's own
+  // header — and its back arrow — usable. Falls back to the whole viewport.
+  function positionGuard(ov) {
+    var target = document.querySelector('#column-center .chat.active .bubbles');
+    var r = target
+      ? target.getBoundingClientRect()
+      : { top: 0, left: 0, width: window.innerWidth, height: window.innerHeight };
+    ov.style.top = r.top + 'px';
+    ov.style.left = r.left + 'px';
+    ov.style.width = r.width + 'px';
+    ov.style.height = r.height + 'px';
+  }
+
+  function closeChat() {
+    try {
+      window.appImManager.setPeer({ peerId: 0 });
+      return;
+    } catch (e) {}
+    try {
+      history.back();
+    } catch (e2) {}
   }
 
   function buildGuard() {
@@ -544,12 +697,9 @@ export const BOOTSTRAP_TEMPLATE = `
 
     var ov = document.createElement('div');
     ov.id = GUARD_ID;
-    // Covers the viewport rather than just the conversation column: on a phone
-    // Telegram is single-column, so there is no "rest of the app" to leave
-    // usable behind it.
     ov.setAttribute(
       'style',
-      'position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483000;' +
+      'position:fixed;z-index:2147483000;' +
         'display:flex;align-items:center;justify-content:center;' +
         'background:rgba(24,34,45,0.94);color:#fff;' +
         'font:15px/1.5 system-ui,-apple-system,sans-serif;'
@@ -579,10 +729,9 @@ export const BOOTSTRAP_TEMPLATE = `
     );
     btn.addEventListener('click', function (e) {
       e.preventDefault();
+      e.stopPropagation();
       removeGuard();
-      try {
-        history.back();
-      } catch (e2) {}
+      closeChat();
     });
 
     box.appendChild(icon);
@@ -594,27 +743,52 @@ export const BOOTSTRAP_TEMPLATE = `
     return ov;
   }
 
-  function applyGuard() {
-    if (!actionEnabled('focusLock')) {
+  // Re-evaluates when the open chat changes, or always when force is set
+  // (after a settings change).
+  function checkGuard(force) {
+    var peerId = actionEnabled('focusLock') ? openPeerId() : 0;
+    if (!peerId) {
+      guardPeer = null;
+      guardToken++;
       removeGuard();
       return;
     }
-    refreshKnownTitles();
-    // No chat list has ever been seen, so there is no basis for a decision.
-    // Fail open: an overlay with nothing behind it and no way past is far worse
-    // than letting one chat through.
-    if (!lastKnownTitles) {
-      removeGuard();
+    if (!force && peerId === guardPeer) {
+      var up = document.getElementById(GUARD_ID);
+      // Follow layout changes (rotation, the keyboard opening).
+      if (up) positionGuard(up);
       return;
     }
-    var open = openChatTitle();
-    if (!open || isChatAllowed(open)) {
-      removeGuard();
-      return;
-    }
-    // Already up — re-posting on every scan would drown the log.
-    if (document.getElementById(GUARD_ID)) return;
-    if (buildGuard()) post({ type: 'action', what: 'focus-lock', chat: open });
+    guardPeer = peerId;
+    var token = ++guardToken;
+    Promise.resolve()
+      .then(function () {
+        return guardAllows(peerId);
+      })
+      // On internal errors, never trap the user behind the overlay.
+      .catch(function () {
+        return true;
+      })
+      .then(function (ok) {
+        if (token !== guardToken) return;
+        if (ok) {
+          removeGuard();
+          return;
+        }
+        var ov = document.getElementById(GUARD_ID);
+        if (!ov) {
+          ov = buildGuard();
+          if (!ov) return;
+          post({ type: 'action', what: 'focus-lock', peer: String(peerId) });
+        }
+        positionGuard(ov);
+      });
+  }
+
+  if (ruleFor('focusLock')) {
+    setInterval(function () {
+      if (actionEnabled('focusLock') && window.appImManager) checkGuard(false);
+    }, GUARD_TICK_MS);
   }
 
   // --- Playback + fullscreen reporting -------------------------------------
@@ -687,7 +861,6 @@ export const BOOTSTRAP_TEMPLATE = `
     // pathScope may have changed, so stale marks must go before rescanning.
     clearTextHides();
     scanText();
-    applyGuard();
     post({ type: 'nav', url: location.href });
   }
   var origPush = history.pushState;
@@ -704,7 +877,7 @@ export const BOOTSTRAP_TEMPLATE = `
   };
   window.addEventListener('popstate', onUrlChange);
   // Telegram Web routes entirely through the hash (/k/#-1001234), so this is
-  // its main navigation signal. onUrlChange is idempotent, so overlapping with
+  // its only navigation signal. onUrlChange is idempotent, so overlapping with
   // popstate costs nothing.
   window.addEventListener('hashchange', onUrlChange);
 
@@ -718,7 +891,8 @@ export const BOOTSTRAP_TEMPLATE = `
       clearTextHides();
       scanText();
       syncFocus();
-      applyGuard();
+      syncChatFilter();
+      checkGuard(true);
     },
     debug: function (on) {
       state.debug = !!on;
@@ -732,10 +906,11 @@ export const BOOTSTRAP_TEMPLATE = `
     installObserver();
     applyCss();
     scanText();
-    // Both are idempotent, which matters: boot() runs up to five times per page
-    // load. syncFocus only restarts the retry loop when the folder changed.
+    // All idempotent, which matters: boot() runs up to five times per page
+    // load. syncFocus and syncChatFilter only act when their settings changed.
     syncFocus();
-    applyGuard();
+    syncChatFilter();
+    syncChatFlags();
   }
 
   boot();

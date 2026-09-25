@@ -30,34 +30,42 @@ Metro only inlines `EXPO_PUBLIC_*` vars that are referenced as a literal
 
 # Telegram (FreeTele)
 
-**Telegram Web is hash-routed** (`/k/#-1001234`), so `location.pathname` is
-always `/k/`. Every path-based mechanism in this codebase — `pathScope`,
-`redirect`, `blockPathPattern`, and `shouldLoad`'s `blockedPathPatterns` — is
-inert for this profile by construction. Telegram rules are CSS and `jsAction`
-only. Reaching for a redirect there will silently do nothing.
+**Telegram Web K only** (`/k/`), ported from the unhookTelegram extension
+(`~/Desktop/unhookTelegram`), whose selectors were verified against the live
+WebK DOM. WebA (`/a/`) has different markup and none of the internals below,
+so the `stay-on-webk` rule redirects `/a/` → `/k/` (e.g. after WebK's "Switch
+to A version").
 
-Pinned to **WebK** (`/k/`), which has the stabler hooks (`#column-left`,
-`.chatlist-chat`, `#folders-container`). WebA (`/a/`) selectors ride along as
-harmless fallbacks.
+**Telegram Web is hash-routed** (`/k/#-1001234`), so inside the app
+`location.pathname` is always `/k/`. `pathScope`, `blockPathPattern` and
+`shouldLoad`'s `blockedPathPatterns` are inert for this profile; the `/a/`
+redirect is the one path mechanism that fires, because `/a/` is a real path.
 
-Two rules are more than CSS:
+**WebK's chat list is virtual** — only on-screen rows are mounted, each
+absolutely positioned — so nothing that needs the whole list can work from the
+DOM. The name filters and the focus lock work on WebK's own globals instead
+(`appDialogsManager`, `apiManagerProxy`, `appImManager`, `rootScope`). If a
+Telegram update renames those, they stop working (failing open) while the CSS
+rules carry on:
 
-- **Open a folder on launch** (`focusFolder`) clicks the user's folder tab on
-  every load, letting Telegram filter the chat list server-side. DOM-side
-  filtering cannot work — the dialog list is virtualized, so it can only ever
-  see what happens to be rendered. The retry loop (~450ms × 20) is beating two
-  races: the client not having attached handlers yet, and Telegram restoring
-  the last-open folder a beat after the first click.
-- **Block chats outside that folder** (`focusLock`) covers any open chat whose
-  title the chat list never offered. It reads from a **snapshot** of the last
-  populated list, not a live query: Telegram is single-column on a phone, so
-  opening a chat takes the list off-screen and a live read would come back
-  empty exactly when the lock has a decision to make. It fails open when no
-  list has ever been seen — never trap the user behind an overlay.
-
-`hide-folder-tabs` carries `deferUntil: 'focusFolder'` because a `display:none`
-tab cannot be clicked; its CSS is withheld until the focus click lands. That is
-the only reason `deferUntil` exists.
+- **Show only / hide chats by name** (`chatWhitelist` / `chatBlacklist`,
+  comma-separated params) wrap `dialogsFetcher` and `canUpdateDialog` on the
+  dialog-list base class. The fetcher scans a folder's whole list once (cap
+  3000, cached 30s) and serves pages out of the matches, so Telegram renders a
+  gap-free list. `"saved messages"` matches your own chat. While waiting for
+  the patch, `<html data-unhook-tg-loading>` hides the unfiltered list (8s max).
+- **Open a folder on launch** (`focusFolder`) clicks the tab in `#folders-tabs`
+  whose `.text-super` label matches, until it has been `.active` for 3 ticks
+  (400ms, gives up after 20s) — Telegram restores the last-open folder a beat
+  after load. A hidden tab still switches, so `hide-folder-tabs` needs no
+  special handling.
+- **Block other chats** (`focusLock`) checks the open chat
+  (`appImManager.chat.peerId`) every 100ms: allowed if it is in the focus
+  folder (real membership via the folder's dialog index key) or matches a
+  "show only" name, and never if it matches a "hide" name. The overlay covers
+  only the message area, so Telegram's own back arrow stays usable; its button
+  calls `appImManager.setPeer({peerId: 0})`. Unknown folder or internal error
+  → fail open. Never trap the user behind an overlay.
 
 Session state lives in **IndexedDB + localStorage**, not cookies, so the
 `CookieManager` flushing in `BrowserScreen` does nothing here; persistence comes
@@ -85,7 +93,8 @@ which obeys the phone's auto-rotate switch and does nothing when it is off.
 
 - `npm run typecheck`
 - `npm run check` — transpiles the filter/injection/navigation modules and
-  exercises them in jsdom (all three profiles), plus unit-tests `shouldLoad`.
+  exercises them in jsdom (all three profiles, Telegram against a fake of the
+  WebK internals), plus unit-tests `shouldLoad`.
 
 Instagram and Telegram selectors need on-device tuning: enable **Debug: outline
 matches** in Settings and read the per-selector counts in Metro via
