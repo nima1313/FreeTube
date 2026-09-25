@@ -87,6 +87,12 @@ from `domStorageEnabled` + `incognito={false}`, which are already set.
 sign in with phone number + code. Web push does not exist in a WebView, so
 FreeTele is silent by design.
 
+**Voice/video messages** need mic + camera. react-native-webview's
+`onPermissionRequest` already turns `getUserMedia` into an Android runtime
+prompt, but Android silently denies anything the manifest doesn't declare, so
+the `permissions` list on the telegram/instagram variants in `app.config.ts`
+is what makes the dialog appear. Changing it needs a `prebuild --clean`.
+
 # Device behavior (screen wake + rotation)
 
 The app is portrait-only (`app.json`); a video going fullscreen forces

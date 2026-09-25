@@ -12,7 +12,21 @@ interface Variant {
   androidPackage: string;
   /** Adaptive-icon background — the cheapest way to tell the two apps apart. */
   iconBackground: string;
+  /**
+   * Extra manifest permissions. react-native-webview already turns a page's
+   * getUserMedia into an Android runtime prompt, but Android silently denies a
+   * permission the manifest doesn't declare — so without these, no dialog.
+   */
+  permissions?: string[];
 }
+
+// Voice/video messages. MODIFY_AUDIO_SETTINGS is install-time (no prompt);
+// WebView's WebRTC audio path needs it or the mic can record silence.
+const MEDIA_CAPTURE = [
+  'android.permission.RECORD_AUDIO',
+  'android.permission.CAMERA',
+  'android.permission.MODIFY_AUDIO_SETTINGS',
+];
 
 const VARIANTS: Record<string, Variant> = {
   youtube: {
@@ -26,6 +40,7 @@ const VARIANTS: Record<string, Variant> = {
     slug: 'FreeGram',
     androidPackage: 'com.nima.freegram',
     iconBackground: '#FDE7F3',
+    permissions: MEDIA_CAPTURE,
   },
   telegram: {
     name: 'FreeTele',
@@ -34,6 +49,7 @@ const VARIANTS: Record<string, Variant> = {
     // Teal, not Telegram's blue: FreeTube already owns the pale blue above, and
     // this colour is the only thing telling the launcher icons apart.
     iconBackground: '#D7F0EA',
+    permissions: MEDIA_CAPTURE,
   },
 };
 
@@ -57,6 +73,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     android: {
       ...(config.android ?? {}),
       package: variant.androidPackage,
+      permissions: [...(config.android?.permissions ?? []), ...(variant.permissions ?? [])],
       adaptiveIcon: {
         ...(config.android?.adaptiveIcon ?? {}),
         backgroundColor: variant.iconBackground,
