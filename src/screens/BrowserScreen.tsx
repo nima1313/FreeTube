@@ -9,6 +9,7 @@ import React, {
 } from 'react';
 import { AppState, BackHandler, StyleSheet, View } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
+import { DownloadMessage, handleDownloadMessage } from '../device/downloads';
 import { setFullscreenOrientation, setKeepAwake } from '../device/screen';
 import { activeBlockedPaths, buildApplyCall, buildBootstrap, buildDebugCall } from '../filters/buildInjection';
 import { EnabledMap, ParamMap, SiteProfile } from '../filters/types';
@@ -108,7 +109,7 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
 
   const onMessage = useCallback(
     (event: WebViewMessageEvent) => {
-      let msg: { type?: string; playing?: boolean; on?: boolean };
+      let msg: { type?: string; playing?: boolean; on?: boolean; phase?: string };
       try {
         msg = JSON.parse(event.nativeEvent.data);
       } catch {
@@ -119,6 +120,12 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
       // be handled in release builds too, so they run before the __DEV__ log.
       if (msg.type === 'playback') setPlaying(!!msg.playing);
       else if (msg.type === 'fullscreen') setFullscreenOrientation(!!msg.on);
+      else if (msg.type === 'download') {
+        // Also load-bearing. Returns before the log: a chunk is ~700KB of base64.
+        handleDownloadMessage(msg as DownloadMessage);
+        if (__DEV__ && msg.phase !== 'chunk') console.log('[unhook] download', msg.phase);
+        return;
+      }
       if (__DEV__) console.log('[unhook]', msg);
     },
     [setPlaying]

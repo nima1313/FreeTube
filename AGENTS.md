@@ -93,6 +93,26 @@ prompt, but Android silently denies anything the manifest doesn't declare, so
 the `permissions` list on the telegram/instagram variants in `app.config.ts`
 is what makes the dialog appear. Changing it needs a `prebuild --clean`.
 
+# Downloads
+
+WebK saves a file by streaming it through its service worker: it sets a
+hidden iframe to `d/<id>`, and the SW answers with the file as an attachment.
+Left alone, that response goes to react-native-webview's `DownloadListener`,
+which gives the **URL** to Android's DownloadManager (the "Downloading" toast).
+DownloadManager requests `/k/d/<id>` from outside the WebView, where there is
+no SW, so it fails, and the WebView drops the stream after a few MB.
+DownloadManager can't fetch `blob:` URLs either.
+
+So the bootstrap's Downloads section intercepts both paths: iframe `src`
+matching same-origin `/d/<digits>`, and clicks on `a[download]` with a `blob:`
+or `data:` href. It `fetch()`es the URL in the page (the SW serves page
+fetches too) and posts `{type:'download', phase:'start'|'chunk'|'end'|'error'}`
+with ~512 KB base64 chunks. `src/device/downloads.ts` queues these, in order,
+into the local Expo module `modules/downloads`, which writes into the public
+Downloads folder through MediaStore (no permission needed; the file stays
+`IS_PENDING` until it's complete). **The `download` message type is
+load-bearing in release builds**, like playback/fullscreen.
+
 # Device behavior (screen wake + rotation)
 
 The app is portrait-only (`app.json`); a video going fullscreen forces

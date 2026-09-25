@@ -409,6 +409,109 @@ check('re-injecting does not duplicate the media listeners', () => {
   assert(n === 1, `expected 1 playback message, got ${n}`);
 });
 
+console.log('\n-- downloads --');
+// WebK streams a download through its service worker at d/<id>. The bootstrap
+// must fetch that URL itself (never let the iframe navigate, which hands it to
+// Android's DownloadManager) and post the bytes as ordered base64 chunks.
+function dlBoot(respond) {
+  const fetched = [];
+  const b = boot('<html><head></head><body></body></html>', 'https://web.telegram.org/k/', telegramProfile, {}, {}, (w) => {
+    w.fetch = (url) => {
+      fetched.push(String(url));
+      return Promise.resolve(respond(String(url)));
+    };
+  });
+  const msgs = () => b.posted.filter((m) => m.type === 'download');
+  return { ...b, fetched, msgs };
+}
+function streamOf(chunks, { failAfter } = {}) {
+  let i = 0;
+  return new ReadableStream({
+    pull(c) {
+      if (failAfter !== undefined && i === failAfter) return c.error(new Error('DOWNLOAD_CANCELED'));
+      if (i < chunks.length) c.enqueue(chunks[i++]);
+      else c.close();
+    },
+  });
+}
+const waitFor = async (cond, ms = 2000) => {
+  for (let t = 0; t < ms && !cond(); t += 10) await sleep(10);
+};
+
+check('WebK d/<id> iframe is fetched in-page and never navigates', async () => {
+  // 1.3 MB in uneven parts, so the 512 KB batching has to split and join.
+  const bytes = new Uint8Array(1300 * 1024).map((_, i) => (i * 31) & 255);
+  const parts = [bytes.subarray(0, 700000), bytes.subarray(700000, 700001), bytes.subarray(700001)];
+  const dl = dlBoot(
+    () =>
+      new Response(streamOf(parts), {
+        headers: {
+          'Content-Type': 'application/vnd.android.package-archive',
+          'Content-Disposition': `attachment; filename="_.apk"; filename*=UTF-8''${encodeURIComponent('برنامه.apk')}`,
+          'Content-Length': String(bytes.length),
+        },
+      })
+  );
+  const iframe = dl.window.document.createElement('iframe');
+  iframe.src = 'd/12345';
+  dl.window.document.body.append(iframe);
+  assert(!iframe.getAttribute('src'), 'iframe was allowed to navigate to ' + iframe.getAttribute('src'));
+  assert(dl.fetched[0] === 'https://web.telegram.org/k/d/12345', 'fetched ' + JSON.stringify(dl.fetched));
+  await waitFor(() => dl.msgs().some((m) => m.phase === 'end' || m.phase === 'error'));
+  const m = dl.msgs();
+  const start = m[0];
+  assert(start.phase === 'start', JSON.stringify(m.map((x) => x.phase)));
+  assert(start.name === 'برنامه.apk', 'name ' + start.name);
+  assert(start.mime === 'application/vnd.android.package-archive', 'mime ' + start.mime);
+  assert(start.size === bytes.length, 'size ' + start.size);
+  assert(m[m.length - 1].phase === 'end', 'last phase ' + m[m.length - 1].phase);
+  const chunks = m.filter((x) => x.phase === 'chunk');
+  assert(chunks.length >= 2 && chunks.every((x) => x.id === start.id), 'chunks ' + chunks.length);
+  const got = Buffer.concat(chunks.map((x) => Buffer.from(x.data, 'base64')));
+  assert(got.equals(Buffer.from(bytes)), `bytes differ (${got.length} vs ${bytes.length})`);
+});
+
+check('setAttribute("src", d/<id>) is caught too', () => {
+  const dl = dlBoot(() => new Response(streamOf([new Uint8Array([1])])));
+  const iframe = dl.window.document.createElement('iframe');
+  iframe.setAttribute('src', '/k/d/777');
+  assert(!iframe.getAttribute('src'), 'navigated');
+  assert(dl.fetched[0] === 'https://web.telegram.org/k/d/777', JSON.stringify(dl.fetched));
+});
+
+check('ordinary iframe src passes through untouched', () => {
+  const dl = dlBoot(() => new Response(''));
+  const a = dl.window.document.createElement('iframe');
+  a.src = 'https://web.telegram.org/k/embed/1';
+  const b = dl.window.document.createElement('iframe');
+  b.setAttribute('src', 'https://example.com/d/12');
+  assert(a.src === 'https://web.telegram.org/k/embed/1', 'src was ' + a.src);
+  assert(b.getAttribute('src') === 'https://example.com/d/12', 'cross-origin d/ swallowed');
+  assert(dl.fetched.length === 0, 'fetched ' + JSON.stringify(dl.fetched));
+});
+
+check('a stream cancelled mid-download posts error', async () => {
+  const dl = dlBoot(() => new Response(streamOf([new Uint8Array(10)], { failAfter: 1 })));
+  dl.window.document.createElement('iframe').src = 'd/9';
+  await waitFor(() => dl.msgs().some((m) => m.phase === 'error' || m.phase === 'end'));
+  const last = dl.msgs().pop();
+  assert(last.phase === 'error' && last.started === true, JSON.stringify(last));
+});
+
+check('blob: anchor download is intercepted and saved under its download name', async () => {
+  const dl = dlBoot(() => new Response(streamOf([new Uint8Array([7, 8, 9])])));
+  const a = dl.window.document.createElement('a');
+  a.href = 'blob:https://web.telegram.org/0000-1111';
+  a.download = 'photo.jpg';
+  dl.window.document.body.append(a);
+  const ev = new dl.window.MouseEvent('click', { bubbles: true, cancelable: true });
+  a.dispatchEvent(ev);
+  assert(ev.defaultPrevented, 'default navigation not prevented');
+  assert(dl.fetched[0] === 'blob:https://web.telegram.org/0000-1111', JSON.stringify(dl.fetched));
+  await waitFor(() => dl.msgs().some((m) => m.phase === 'end'));
+  assert(dl.msgs()[0].name === 'photo.jpg', 'name ' + dl.msgs()[0].name);
+});
+
 console.log('\n-- rule params --');
 check('a paramMap is inert for profiles that declare no params', () =>
   assert(

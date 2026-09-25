@@ -941,6 +941,152 @@ export const BOOTSTRAP_TEMPLATE = `
     reportFullscreen();
   }, 2000);
 
+  // --- Downloads -------------------------------------------------------------
+  // Not filtering either: this is what makes "Download" work at all. Telegram
+  // Web K streams a file to disk through its service worker — it points a
+  // hidden iframe at d/<id> and the SW answers with the file as an attachment.
+  // In the WebView that response goes to react-native-webview's
+  // DownloadListener, which hands the URL to Android's DownloadManager, and
+  // that re-requests d/<id> from outside the WebView, where there is no SW:
+  // the download fails after a few MB. So the URL is fetched here instead
+  // (the SW serves page fetches too) and the bytes go to native as base64
+  // chunks — see src/device/downloads.ts. Blob downloads get the same
+  // treatment: DownloadManager cannot fetch blob: URLs either.
+
+  var DL_CHUNK = 512 * 1024;
+  var dlCount = 0;
+
+  function isSwDownload(value) {
+    try {
+      var u = new URL(String(value), location.href);
+      return u.origin === location.origin && /\\/d\\/\\d+$/.test(u.pathname) ? u.href : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function dispositionName(header) {
+    if (!header) return '';
+    var m = /filename\\*\\s*=\\s*UTF-8''([^;]+)/i.exec(header);
+    if (m) {
+      try {
+        return decodeURIComponent(m[1].trim());
+      } catch (e) {}
+    }
+    m = /filename\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"/i.exec(header) || /filename\\s*=\\s*([^;]+)/i.exec(header);
+    return m ? m[1].replace(/\\\\(.)/g, '$1').trim() : '';
+  }
+
+  function toBase64(parts) {
+    return new Promise(function (resolve, reject) {
+      var fr = new FileReader();
+      fr.onload = function () {
+        var s = String(fr.result);
+        resolve(s.slice(s.indexOf(',') + 1));
+      };
+      fr.onerror = function () { reject(fr.error); };
+      fr.readAsDataURL(new Blob(parts));
+    });
+  }
+
+  function saveUrl(url, fallbackName) {
+    var id = 'dl' + ++dlCount + '-' + Date.now();
+    var started = false;
+    fetch(url)
+      .then(function (res) {
+        if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
+        var h = res.headers;
+        post({
+          type: 'download',
+          phase: 'start',
+          id: id,
+          name: dispositionName(h.get('content-disposition')) || fallbackName || 'download',
+          mime: (h.get('content-type') || 'application/octet-stream').split(';')[0].trim(),
+          size: +h.get('content-length') || 0,
+        });
+        started = true;
+        var reader = res.body.getReader();
+        var parts = [];
+        var buffered = 0;
+        function flush() {
+          if (!buffered) return Promise.resolve();
+          var batch = parts;
+          parts = [];
+          buffered = 0;
+          return toBase64(batch).then(function (data) {
+            post({ type: 'download', phase: 'chunk', id: id, data: data });
+          });
+        }
+        function pump() {
+          return reader.read().then(function (r) {
+            if (r.done) return flush();
+            parts.push(r.value);
+            buffered += r.value.byteLength;
+            return (buffered >= DL_CHUNK ? flush() : Promise.resolve()).then(pump);
+          });
+        }
+        return pump();
+      })
+      .then(function () {
+        post({ type: 'download', phase: 'end', id: id });
+      })
+      .catch(function (e) {
+        // Cancelling in Telegram errors the SW stream, which lands here too.
+        post({
+          type: 'download',
+          phase: 'error',
+          id: id,
+          started: started,
+          name: fallbackName || '',
+          reason: String((e && e.message) || e),
+        });
+      });
+  }
+
+  (function () {
+    var proto = window.HTMLIFrameElement && HTMLIFrameElement.prototype;
+    var desc = proto && Object.getOwnPropertyDescriptor(proto, 'src');
+    if (desc && desc.set && desc.configurable) {
+      Object.defineProperty(proto, 'src', {
+        configurable: true,
+        enumerable: desc.enumerable,
+        get: desc.get,
+        set: function (v) {
+          var dl = isSwDownload(v);
+          // Leaving src unset means no navigation, so the DownloadListener
+          // (and its doomed DownloadManager request) never fires.
+          if (dl) saveUrl(dl);
+          else desc.set.call(this, v);
+        },
+      });
+    }
+    var origSetAttr = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function (name, value) {
+      if (this instanceof HTMLIFrameElement && String(name).toLowerCase() === 'src') {
+        var dl = isSwDownload(value);
+        if (dl) {
+          saveUrl(dl);
+          return;
+        }
+      }
+      return origSetAttr.apply(this, arguments);
+    };
+  })();
+
+  // WebK's fallback (and anything else saving a blob) clicks a detached
+  // <a download href="blob:..."> and revokes the URL 100ms later; fetch() is
+  // called synchronously here, which resolves the blob before that.
+  window.addEventListener(
+    'click',
+    function (e) {
+      var a = e.target && e.target.closest ? e.target.closest('a[download]') : null;
+      if (!a || !/^(blob|data):/i.test(a.href)) return;
+      e.preventDefault();
+      saveUrl(a.href, a.getAttribute('download') || '');
+    },
+    true
+  );
+
   // --- SPA survival ---------------------------------------------------------
 
   // The observer needs a root element, which does not always exist yet at
