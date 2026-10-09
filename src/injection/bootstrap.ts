@@ -90,7 +90,7 @@ export const BOOTSTRAP_TEMPLATE = `
     // The chat filter's page flags ride along, and outside the debug swap:
     // they toggle state rather than hide a filtered element.
     var extra = ruleFor('chatWhitelist') || ruleFor('chatBlacklist') ? CHAT_FILTER_CSS : '';
-    el.textContent = sels.join(',\\n') + decl + extra;
+    el.textContent = sels.join(',\\n') + decl + extra + SAVED_DOC_CSS;
   }
 
   // --- Redirects ------------------------------------------------------------
@@ -793,12 +793,12 @@ export const BOOTSTRAP_TEMPLATE = `
     } catch (e2) {}
   }
 
-  function buildGuard() {
+  function buildGuard(id, subText, onBack) {
     var host = document.body || document.documentElement;
     if (!host) return null;
 
     var ov = document.createElement('div');
-    ov.id = GUARD_ID;
+    ov.id = id;
     ov.setAttribute(
       'style',
       'position:fixed;z-index:2147483000;' +
@@ -819,7 +819,7 @@ export const BOOTSTRAP_TEMPLATE = `
     heading.setAttribute('style', 'font-weight:600;margin-bottom:6px;');
 
     var sub = document.createElement('div');
-    sub.textContent = "This chat isn't in your focus list.";
+    sub.textContent = subText;
     sub.setAttribute('style', 'opacity:0.75;margin-bottom:16px;');
 
     var btn = document.createElement('button');
@@ -832,8 +832,9 @@ export const BOOTSTRAP_TEMPLATE = `
     btn.addEventListener('click', function (e) {
       e.preventDefault();
       e.stopPropagation();
-      removeGuard();
-      closeChat();
+      var gone = document.getElementById(id);
+      if (gone && gone.parentNode) gone.parentNode.removeChild(gone);
+      onBack();
     });
 
     box.appendChild(icon);
@@ -879,7 +880,7 @@ export const BOOTSTRAP_TEMPLATE = `
         }
         var ov = document.getElementById(GUARD_ID);
         if (!ov) {
-          ov = buildGuard();
+          ov = buildGuard(GUARD_ID, "This chat isn't in your focus list.", closeChat);
           if (!ov) return;
           post({ type: 'action', what: 'focus-lock', peer: String(peerId) });
         }
@@ -887,9 +888,94 @@ export const BOOTSTRAP_TEMPLATE = `
       });
   }
 
+  // --- Focus lock: other folders ---------------------------------------------
+  // With a focus folder set, any other folder tab (All chats included) gets
+  // its chat list covered too. The tabs themselves stay usable, so switching
+  // back to the focus folder — or the button — lifts it.
+
+  var FOLDER_GUARD_ID = '__unhook_folder_guard';
+
+  function removeFolderGuard() {
+    var ov = document.getElementById(FOLDER_GUARD_ID);
+    if (ov && ov.parentNode) ov.parentNode.removeChild(ov);
+  }
+
+  // Whether the list is what the user is actually looking at: not behind
+  // search, a settings panel, a popup or (on a phone) an open chat. The point
+  // test only runs where layout exists; without it the rect has to do.
+  function listOnScreen(container, r) {
+    if (r.width <= 0 || r.height <= 0) return false;
+    if (r.right <= 0 || r.bottom <= 0 || r.left >= window.innerWidth || r.top >= window.innerHeight) {
+      return false;
+    }
+    if (typeof document.elementsFromPoint !== 'function') return true;
+    var x = Math.min(Math.max(r.left + r.width / 2, 0), window.innerWidth - 1);
+    var y = Math.min(Math.max(r.top + r.height / 2, 0), window.innerHeight - 1);
+    var hits = document.elementsFromPoint(x, y);
+    for (var i = 0; i < hits.length; i++) {
+      if (hits[i].closest && hits[i].closest('#' + FOLDER_GUARD_ID)) continue;
+      return container.contains(hits[i]);
+    }
+    return false;
+  }
+
+  // The folder overlay's box, or null when it shouldn't show at all.
+  function folderGuardRect() {
+    if (!actionEnabled('focusLock') || !actionEnabled('focusFolder')) return null;
+    var name = normLabel(actionParam('focusFolder'));
+    // Still switching to the focus folder after launch: don't flash.
+    if (!name || focusTimer) return null;
+    var focusTab = findFocusTab(name);
+    if (!focusTab || focusTab.classList.contains('active')) return null;
+    if (!document.querySelector('#folders-tabs .menu-horizontal-div-item.active')) return null;
+    // WebK's search results and open menus sit over the list; never cover them.
+    if (document.querySelector('.is-search-active, .btn-menu.active')) return null;
+    var container = document.getElementById('folders-container');
+    if (!container) return null;
+    var r = container.getBoundingClientRect();
+    if (!listOnScreen(container, r)) return null;
+    var top = Math.max(r.top, 0);
+    var tabs = document.getElementById('folders-tabs');
+    var bar = tabs && (tabs.closest('.folders-tabs-scrollable') || tabs);
+    if (bar) {
+      var b = bar.getBoundingClientRect();
+      if (b.height > 0) top = Math.max(top, b.bottom);
+    }
+    var left = Math.max(r.left, 0);
+    var right = Math.min(r.right, window.innerWidth);
+    var bottom = Math.min(r.bottom, window.innerHeight);
+    if (bottom <= top || right <= left) return null;
+    return { top: top, left: left, width: right - left, height: bottom - top };
+  }
+
+  function checkFolderGuard() {
+    var box = null;
+    try {
+      box = folderGuardRect();
+    } catch (e) {}
+    if (!box) {
+      removeFolderGuard();
+      return;
+    }
+    var ov = document.getElementById(FOLDER_GUARD_ID);
+    if (!ov) {
+      ov = buildGuard(FOLDER_GUARD_ID, "This folder isn't your focus folder.", function () {
+        var tab = findFocusTab(normLabel(actionParam('focusFolder')));
+        if (tab) tapTab(tab);
+      });
+      if (!ov) return;
+      post({ type: 'action', what: 'focus-lock-folder' });
+    }
+    ov.style.top = box.top + 'px';
+    ov.style.left = box.left + 'px';
+    ov.style.width = box.width + 'px';
+    ov.style.height = box.height + 'px';
+  }
+
   if (ruleFor('focusLock')) {
     setInterval(function () {
       if (actionEnabled('focusLock') && window.appImManager) checkGuard(false);
+      checkFolderGuard();
     }, GUARD_TICK_MS);
   }
 
@@ -989,7 +1075,9 @@ export const BOOTSTRAP_TEMPLATE = `
     });
   }
 
-  function saveUrl(url, fallbackName) {
+  // doc: the Telegram document id, when known — what a later tap on the same
+  // file uses to open the saved copy instead of downloading it again.
+  function saveUrl(url, fallbackName, doc) {
     var id = 'dl' + ++dlCount + '-' + Date.now();
     var started = false;
     fetch(url)
@@ -1003,6 +1091,7 @@ export const BOOTSTRAP_TEMPLATE = `
           name: dispositionName(h.get('content-disposition')) || fallbackName || 'download',
           mime: (h.get('content-type') || 'application/octet-stream').split(';')[0].trim(),
           size: +h.get('content-length') || 0,
+          doc: doc || '',
         });
         started = true;
         var reader = res.body.getReader();
@@ -1043,6 +1132,16 @@ export const BOOTSTRAP_TEMPLATE = `
       });
   }
 
+  // d/<id> -> the document that downloadToDisc was saving, see wrapDownloads.
+  var dlDocs = {};
+
+  function saveSwDownload(url) {
+    var m = /\\/d\\/(\\d+)$/.exec(new URL(url).pathname);
+    var doc = m ? dlDocs[m[1]] : '';
+    if (m) delete dlDocs[m[1]];
+    saveUrl(url, '', doc);
+  }
+
   (function () {
     var proto = window.HTMLIFrameElement && HTMLIFrameElement.prototype;
     var desc = proto && Object.getOwnPropertyDescriptor(proto, 'src');
@@ -1055,7 +1154,7 @@ export const BOOTSTRAP_TEMPLATE = `
           var dl = isSwDownload(v);
           // Leaving src unset means no navigation, so the DownloadListener
           // (and its doomed DownloadManager request) never fires.
-          if (dl) saveUrl(dl);
+          if (dl) saveSwDownload(dl);
           else desc.set.call(this, v);
         },
       });
@@ -1065,7 +1164,7 @@ export const BOOTSTRAP_TEMPLATE = `
       if (this instanceof HTMLIFrameElement && String(name).toLowerCase() === 'src') {
         var dl = isSwDownload(value);
         if (dl) {
-          saveUrl(dl);
+          saveSwDownload(dl);
           return;
         }
       }
@@ -1086,6 +1185,500 @@ export const BOOTSTRAP_TEMPLATE = `
     },
     true
   );
+
+  // --- Downloads: open a saved file on tap ----------------------------------
+  // Like the Telegram app: once a document is saved, tapping it opens it.
+  // WebK itself would download it again (and for files over 20 MB it even
+  // brings the download arrow back), so a tap on a saved document is taken
+  // over here and native opens the file. Which documents are saved comes from
+  // native (savedDocs on the public handle), keyed by Telegram document id;
+  // that is why downloadToDisc is wrapped — the d/<id> URL alone does not say
+  // which document it is.
+
+  var SAVED_ATTR = 'data-unhook-saved';
+  var SAVED_DOC_CSS =
+    '\\n[' + SAVED_ATTR + '] .preloader-container, [' + SAVED_ATTR + '] .document-download' +
+    ' { display: none !important; }';
+  var savedDocIds = {};
+  var savedCount = 0;
+
+  function wrapDownloads() {
+    var dm = window.appDownloadManager;
+    if (!dm || typeof dm.downloadToDisc !== 'function' || dm.downloadToDisc.__unhook) return;
+    var orig = dm.downloadToDisc;
+    var wrapped = function (options, justAttach) {
+      var res = orig.apply(this, arguments);
+      // downloadId is assigned synchronously; the iframe is pointed at d/<id>
+      // only after a service-worker ping, so this always lands first.
+      try {
+        var media = options && options.media;
+        if (!justAttach && media && media._ === 'document' && options.downloadId) {
+          dlDocs[options.downloadId] = String(media.id);
+        }
+      } catch (e) {}
+      return res;
+    };
+    wrapped.__unhook = true;
+    dm.downloadToDisc = wrapped;
+  }
+
+  function markSavedDocs() {
+    if (!savedCount && !document.querySelector('[' + SAVED_ATTR + ']')) return;
+    var docs = document.querySelectorAll('.document[data-doc-id]');
+    for (var i = 0; i < docs.length; i++) {
+      var on = savedDocIds.hasOwnProperty(docs[i].getAttribute('data-doc-id'));
+      if (on !== docs[i].hasAttribute(SAVED_ATTR)) {
+        if (on) docs[i].setAttribute(SAVED_ATTR, '1');
+        else docs[i].removeAttribute(SAVED_ATTR);
+      }
+    }
+  }
+
+  function setSavedDocs(ids, add) {
+    if (!add) savedDocIds = {};
+    for (var i = 0; i < (ids || []).length; i++) savedDocIds[String(ids[i])] = true;
+    savedCount = Object.keys(savedDocIds).length;
+    markSavedDocs();
+  }
+
+  // On touch devices WebK acts on mousedown, elsewhere on click; a tap sends
+  // both, so whichever comes first opens the file and the other is swallowed.
+  var openedAt = 0;
+  function onDocTap(e) {
+    var t = e.target;
+    var el = t && t.closest ? t.closest('.document[data-doc-id]') : null;
+    if (!el) return;
+    var doc = el.getAttribute('data-doc-id');
+    if (!savedDocIds.hasOwnProperty(doc) || t.closest('.time, .is-selecting')) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (e.type === 'mousedown' || Date.now() - openedAt > 1000) {
+      openedAt = e.type === 'mousedown' ? Date.now() : 0;
+      post({ type: 'download', phase: 'open', id: 'open-' + doc, doc: doc });
+    }
+  }
+  window.addEventListener('mousedown', onDocTap, true);
+  window.addEventListener('click', onDocTap, true);
+
+  setInterval(function () {
+    wrapDownloads();
+    markSavedDocs();
+  }, 500);
+
+  // --- Voice messages -------------------------------------------------------
+  // WebK records voice notes through WebAudio (an AudioWorklet tapping the
+  // mic) into a WebCodecs AudioEncoder. In the Android WebView that comes out
+  // noisy, while video notes — recorded by MediaRecorder from the very same
+  // mic stream — are clean. So voice notes go through MediaRecorder too.
+  //
+  // WebK picks its recorder per chat input: its own WebCodecs one when
+  // AudioEncoder exists, else "new window.Recorder(config)". Hiding
+  // AudioEncoder and owning window.Recorder routes it here. MediaRecorder only
+  // writes WebM, and Telegram voice notes are Ogg Opus, so the Opus packets
+  // are re-wrapped (not re-encoded) by webmToOgg.
+
+  var VOICE_MIME = 'audio/webm;codecs=opus';
+
+  // An EBML variable-length integer at p. With marker set the length bits are
+  // kept, which is how element ids are written. unknown: all value bits set,
+  // which Chrome uses for the size of its live (still growing) elements.
+  function vint(b, p, marker) {
+    var first = b[p];
+    if (first === undefined || first === 0) return null;
+    var len = 1;
+    var mask = 0x80;
+    while (!(first & mask)) {
+      len++;
+      mask >>= 1;
+    }
+    if (p + len > b.length) return null;
+    var low = first & (mask - 1);
+    var v = marker ? first : low;
+    var ones = low === mask - 1;
+    for (var i = 1; i < len; i++) {
+      v = v * 256 + b[p + i];
+      if (b[p + i] !== 255) ones = false;
+    }
+    return { v: v, len: len, unknown: ones };
+  }
+
+  function uintAt(b, start, end) {
+    var v = 0;
+    for (var i = start; i < end; i++) v = v * 256 + b[i];
+    return v;
+  }
+
+  // Elements walked into rather than skipped: Segment, Cluster, Tracks,
+  // TrackEntry, Audio, BlockGroup.
+  var EBML_MASTERS = { 408125543: 1, 524531317: 1, 374648427: 1, 174: 1, 225: 1, 160: 1 };
+
+  function parseWebm(b) {
+    var out = { head: null, channels: 1, delayNs: 0, packets: [] };
+    var p = 0;
+    while (p < b.length) {
+      var id = vint(b, p, true);
+      if (!id) break;
+      var size = vint(b, p + id.len, false);
+      if (!size) break;
+      var body = p + id.len + size.len;
+      if (EBML_MASTERS[id.v]) {
+        p = body;
+        continue;
+      }
+      // A cut-off tail (a snapshot mid-recording) just ends the walk.
+      if (size.unknown || body + size.v > b.length) break;
+      var end = body + size.v;
+      if (id.v === 0xa3 || id.v === 0xa1) {
+        // SimpleBlock / Block: track number, 16-bit timecode, flags, frame.
+        // Chrome never laces audio; a laced block would be skipped.
+        var track = vint(b, body, false);
+        if (track && body + track.len + 3 <= end && !(b[body + track.len + 2] & 0x06)) {
+          out.packets.push(b.subarray(body + track.len + 3, end));
+        }
+      } else if (id.v === 0x63a2) {
+        out.head = b.subarray(body, end);
+      } else if (id.v === 0x9f) {
+        out.channels = uintAt(b, body, end) || 1;
+      } else if (id.v === 0x56aa) {
+        out.delayNs = uintAt(b, body, end);
+      }
+      p = end;
+    }
+    return out;
+  }
+
+  function putAscii(b, o, s) {
+    for (var i = 0; i < s.length; i++) b[o + i] = s.charCodeAt(i);
+  }
+
+  function putLE32(b, o, v) {
+    b[o] = v & 255;
+    b[o + 1] = (v >>> 8) & 255;
+    b[o + 2] = (v >>> 16) & 255;
+    b[o + 3] = (v >>> 24) & 255;
+  }
+
+  function isOpusHead(h) {
+    if (!h || h.length < 19) return false;
+    return String.fromCharCode.apply(null, Array.prototype.slice.call(h, 0, 8)) === 'OpusHead';
+  }
+
+  function makeOpusHead(channels, preSkip) {
+    var h = new Uint8Array(19);
+    putAscii(h, 0, 'OpusHead');
+    h[8] = 1;
+    h[9] = channels;
+    h[10] = preSkip & 255;
+    h[11] = (preSkip >> 8) & 255;
+    putLE32(h, 12, 48000);
+    return h;
+  }
+
+  // Samples (at 48 kHz) in one Opus packet, from its TOC byte (RFC 6716 3.1).
+  function opusSamples(pkt) {
+    if (!pkt.length) return 0;
+    var toc = pkt[0];
+    var cfg = toc >> 3;
+    var frame;
+    if (cfg < 12) frame = [480, 960, 1920, 2880][cfg & 3];
+    else if (cfg < 16) frame = cfg & 1 ? 960 : 480;
+    else frame = [120, 240, 480, 960][cfg & 3];
+    var code = toc & 3;
+    var frames = code === 0 ? 1 : code === 3 ? (pkt.length > 1 ? pkt[1] & 0x3f : 0) : 2;
+    return frame * frames;
+  }
+
+  var CRC_TABLE = null;
+  function oggCrc(b) {
+    if (!CRC_TABLE) {
+      CRC_TABLE = [];
+      for (var i = 0; i < 256; i++) {
+        var r = i << 24;
+        for (var k = 0; k < 8; k++) r = r & 0x80000000 ? (r << 1) ^ 0x04c11db7 : r << 1;
+        CRC_TABLE[i] = r >>> 0;
+      }
+    }
+    var c = 0;
+    for (var j = 0; j < b.length; j++) c = ((c << 8) ^ CRC_TABLE[((c >>> 24) ^ b[j]) & 255]) >>> 0;
+    return c;
+  }
+
+  function oggPage(packets, flags, granule, serial, seq) {
+    var lacing = [];
+    var bodyLen = 0;
+    for (var i = 0; i < packets.length; i++) {
+      var n = packets[i].length;
+      while (n >= 255) {
+        lacing.push(255);
+        n -= 255;
+      }
+      lacing.push(n);
+      bodyLen += packets[i].length;
+    }
+    var page = new Uint8Array(27 + lacing.length + bodyLen);
+    putAscii(page, 0, 'OggS');
+    page[5] = flags;
+    putLE32(page, 6, granule % 4294967296);
+    putLE32(page, 10, Math.floor(granule / 4294967296));
+    putLE32(page, 14, serial);
+    putLE32(page, 18, seq);
+    page[26] = lacing.length;
+    page.set(lacing, 27);
+    var p = 27 + lacing.length;
+    for (var j = 0; j < packets.length; j++) {
+      page.set(packets[j], p);
+      p += packets[j].length;
+    }
+    putLE32(page, 22, oggCrc(page));
+    return page;
+  }
+
+  function concatBytes(parts) {
+    var len = 0;
+    for (var i = 0; i < parts.length; i++) len += parts[i].length;
+    var out = new Uint8Array(len);
+    var p = 0;
+    for (var j = 0; j < parts.length; j++) {
+      out.set(parts[j], p);
+      p += parts[j].length;
+    }
+    return out;
+  }
+
+  // Re-wraps MediaRecorder's WebM Opus as Ogg Opus (RFC 7845): OpusHead page,
+  // OpusTags page, then the packets, granule = samples so far.
+  function webmToOgg(bytes) {
+    var w = parseWebm(bytes);
+    var head = isOpusHead(w.head)
+      ? w.head
+      : makeOpusHead(w.channels, Math.round((w.delayNs * 48000) / 1e9));
+    var tags = new Uint8Array(24);
+    putAscii(tags, 0, 'OpusTags');
+    putLE32(tags, 8, 8);
+    putAscii(tags, 12, 'FreeTele');
+    var serial = (Math.random() * 4294967295) >>> 0;
+    var pages = [oggPage([head], 2, 0, serial, 0), oggPage([tags], 0, 0, serial, 1)];
+    var seq = 2;
+    var granule = 0;
+    var batch = [];
+    var segs = 0;
+    for (var i = 0; i < w.packets.length; i++) {
+      var pkt = w.packets[i];
+      var need = Math.floor(pkt.length / 255) + 1;
+      if (batch.length && (batch.length >= 50 || segs + need > 255)) {
+        pages.push(oggPage(batch, 0, granule, serial, seq++));
+        batch = [];
+        segs = 0;
+      }
+      batch.push(pkt);
+      segs += need;
+      granule += opusSamples(pkt);
+    }
+    pages.push(oggPage(batch, 4, granule, serial, seq));
+    return concatBytes(pages);
+  }
+
+  function blobBytes(blob) {
+    if (blob.arrayBuffer) {
+      return blob.arrayBuffer().then(function (ab) {
+        return new Uint8Array(ab);
+      });
+    }
+    return new Promise(function (resolve, reject) {
+      var fr = new FileReader();
+      fr.onload = function () {
+        resolve(new Uint8Array(fr.result));
+      };
+      fr.onerror = function () {
+        reject(fr.error);
+      };
+      fr.readAsArrayBuffer(blob);
+    });
+  }
+
+  // Stands in for WebK's recorder: same callbacks, same start/pause/resume/
+  // stop/getSnapshot. sourceNode only feeds WebK's waveform; the recording
+  // itself never touches WebAudio.
+  function VoiceRecorder(config) {
+    var noop = function () {};
+    this.config = config || {};
+    this.state = 'inactive';
+    this.mic = true;
+    this.buffers = [];
+    this.waiters = [];
+    this.chain = Promise.resolve();
+    this.onstart = this.onstop = this.onpause = this.onresume = this.ondataavailable = noop;
+  }
+
+  VoiceRecorder.isRecordingSupported = function () {
+    return true;
+  };
+
+  VoiceRecorder.prototype.setMicrophoneId = function (id) {
+    this.mic = id ? { deviceId: { exact: id } } : true;
+  };
+
+  VoiceRecorder.prototype.release = function () {
+    if (this.stream) {
+      this.stream.getTracks().forEach(function (t) {
+        t.stop();
+      });
+    }
+    if (this.audioContext && this.audioContext.state !== 'closed') {
+      this.audioContext.close().catch(function () {});
+    }
+    this.stream = this.audioContext = null;
+  };
+
+  VoiceRecorder.prototype.start = function () {
+    var self = this;
+    if (self.state !== 'inactive') return Promise.resolve();
+    var md = navigator.mediaDevices;
+    var mic = self.mic;
+    return md
+      .getUserMedia({ audio: mic })
+      .catch(function (e) {
+        // The microphone picked in Telegram's settings is gone: use the default.
+        if (mic !== true && e && (e.name === 'OverconstrainedError' || e.name === 'NotFoundError')) {
+          return md.getUserMedia({ audio: true });
+        }
+        throw e;
+      })
+      .then(function (stream) {
+        self.stream = stream;
+        self.buffers = [];
+        self.waiters = [];
+        self.chain = Promise.resolve();
+        try {
+          var AC = window.AudioContext || window.webkitAudioContext;
+          self.audioContext = new AC();
+          self.sourceNode = self.audioContext.createMediaStreamSource(stream);
+          if (self.audioContext.state === 'suspended') self.audioContext.resume().catch(function () {});
+          var mr = (self.mr = new MediaRecorder(stream, { mimeType: VOICE_MIME, audioBitsPerSecond: 32000 }));
+          mr.ondataavailable = function (e) {
+            self.take(e.data);
+          };
+          mr.start(1000);
+        } catch (e) {
+          self.release();
+          throw e;
+        }
+        self.state = 'recording';
+        self.onstart();
+      });
+  };
+
+  // Queues a chunk's bytes in order; waiters run once everything so far is in.
+  VoiceRecorder.prototype.take = function (blob) {
+    var self = this;
+    if (blob && blob.size) {
+      self.chain = self.chain
+        .then(function () {
+          return blobBytes(blob);
+        })
+        .then(function (b) {
+          self.buffers.push(b);
+        })
+        .catch(function () {});
+    }
+    var waiters = self.waiters;
+    self.waiters = [];
+    self.chain.then(function () {
+      for (var i = 0; i < waiters.length; i++) waiters[i]();
+    });
+  };
+
+  // Pausing flushes MediaRecorder, so the snapshot WebK previews is complete.
+  VoiceRecorder.prototype.pause = function () {
+    var self = this;
+    if (self.state !== 'recording') return Promise.resolve();
+    self.state = 'paused';
+    return new Promise(function (resolve) {
+      self.waiters.push(resolve);
+      try {
+        self.mr.pause();
+        self.mr.requestData();
+      } catch (e) {
+        self.take(null);
+      }
+    }).then(function () {
+      self.onpause();
+    });
+  };
+
+  VoiceRecorder.prototype.resume = function () {
+    if (this.state !== 'paused') return;
+    this.state = 'recording';
+    try {
+      this.mr.resume();
+    } catch (e) {}
+    this.onresume();
+  };
+
+  VoiceRecorder.prototype.getSnapshot = function () {
+    try {
+      return webmToOgg(concatBytes(this.buffers));
+    } catch (e) {
+      return new Uint8Array(0);
+    }
+  };
+
+  VoiceRecorder.prototype.stop = function () {
+    var self = this;
+    if (self.state === 'inactive') return Promise.resolve();
+    self.state = 'inactive';
+    var mr = self.mr;
+    return new Promise(function (resolve) {
+      var done = false;
+      // MediaRecorder hands over its last chunk before "stop", and take()
+      // queues it synchronously, so the chain covers every byte by now.
+      function finish() {
+        if (done) return;
+        done = true;
+        self.chain.then(function () {
+          self.release();
+          var ogg;
+          try {
+            ogg = webmToOgg(concatBytes(self.buffers));
+          } catch (e) {
+            ogg = new Uint8Array(0);
+          }
+          self.buffers = [];
+          self.ondataavailable(ogg);
+          self.onstop();
+          resolve();
+        });
+      }
+      if (!mr || mr.state === 'inactive') return finish();
+      mr.onstop = finish;
+      try {
+        mr.stop();
+      } catch (e) {
+        finish();
+      }
+    });
+  };
+
+  (function () {
+    if (location.hostname !== 'web.telegram.org') return;
+    var MR = window.MediaRecorder;
+    if (!MR || !MR.isTypeSupported || !MR.isTypeSupported(VOICE_MIME)) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+    try {
+      // Only WebK's media editor also checks AudioEncoder: edited videos lose
+      // the option to keep their sound.
+      Object.defineProperty(window, 'AudioEncoder', { value: undefined, configurable: true, writable: true });
+      // WebK assigns its bundled WebAssembly recorder here once it sees no
+      // AudioEncoder; that assignment is ignored.
+      Object.defineProperty(window, 'Recorder', {
+        configurable: true,
+        get: function () {
+          return VoiceRecorder;
+        },
+        set: function () {},
+      });
+    } catch (e) {}
+  })();
 
   // --- SPA survival ---------------------------------------------------------
 
@@ -1141,6 +1734,11 @@ export const BOOTSTRAP_TEMPLATE = `
       syncFocus();
       syncChatFilter();
       checkGuard(true);
+      checkFolderGuard();
+    },
+    // From native: the Telegram documents already saved to Downloads.
+    savedDocs: function (ids, add) {
+      setSavedDocs(ids, add);
     },
     debug: function (on) {
       state.debug = !!on;

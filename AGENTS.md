@@ -76,6 +76,12 @@ rules carry on:
   runs behind the header), so Telegram's own back arrow stays usable; its
   button calls `appImManager.setPeer({peerId: 0})`. Unknown folder or internal
   error → fail open. Never trap the user behind an overlay.
+  With a focus folder set, any *other* folder tab gets a second overlay
+  (`__unhook_folder_guard`) over its chat list, starting below the tabs so
+  switching back stays possible. It stays off while the launch switch to the
+  focus folder is still running, during search (`.is-search-active`), while a
+  WebK menu is open (`.btn-menu.active`), and whenever `elementsFromPoint` says
+  something else (settings, a popup, an open chat) is over the list.
 - **Hide the menu button** must not hide `.animated-menu-icon.state-back`: the
   same element draws the back arrow that closes search, and with the search
   bar also hidden, search mode is otherwise a blank column with no way out.
@@ -112,6 +118,32 @@ into the local Expo module `modules/downloads`, which writes into the public
 Downloads folder through MediaStore (no permission needed; the file stays
 `IS_PENDING` until it's complete). **The `download` message type is
 load-bearing in release builds**, like playback/fullscreen.
+
+Tapping a saved file opens it, like the Telegram app (there is no "saved"
+toast). The bootstrap wraps `appDownloadManager.downloadToDisc` to learn which
+document each `d/<id>` belongs to and sends its id along; the module remembers
+document id → MediaStore uri (SharedPreferences, API 29+ only).
+`BrowserScreen` pushes the live list into the page with
+`window.__unhook.savedDocs(ids, add)` on load, on returning to the app, and
+after each finished download; `saved()` forgets files deleted since. A
+mousedown/click on a saved `.document[data-doc-id]` is taken over (phase
+`open`) and native fires `ACTION_VIEW`. Saved documents get
+`data-unhook-saved`, which hides WebK's download arrow (it puts it back on
+files over 20 MB after every download). FreeTele declares
+`REQUEST_INSTALL_PACKAGES` because Android's installer rejects APKs opened from
+an app without it.
+
+# Voice messages (FreeTele)
+
+WebK records voice notes through WebAudio (an AudioWorklet) into a WebCodecs
+`AudioEncoder`, which sounds noisy in the Android WebView; video notes go
+through `MediaRecorder` and are clean. WebK uses its WebCodecs recorder only
+when `AudioEncoder` exists, else `new window.Recorder(config)`. So on
+web.telegram.org the bootstrap hides `AudioEncoder` and makes `window.Recorder`
+an accessor returning its own MediaRecorder-based recorder (assignments are
+ignored). MediaRecorder only writes WebM, so `webmToOgg` re-wraps the Opus
+packets (no re-encoding) into the Ogg Opus Telegram expects. The cost: WebK's
+media editor sees no `AudioEncoder`, so edited videos can't keep their sound.
 
 # Device behavior (screen wake + rotation)
 

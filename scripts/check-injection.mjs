@@ -512,6 +512,59 @@ check('blob: anchor download is intercepted and saved under its download name', 
   assert(dl.msgs()[0].name === 'photo.jpg', 'name ' + dl.msgs()[0].name);
 });
 
+check('a WebK document download carries its document id', async () => {
+  const dl = dlBoot(() => new Response(streamOf([new Uint8Array([1, 2])])));
+  const w = dl.window;
+  w.appDownloadManager = {
+    downloadToDisc(options) {
+      // Like WebK: the id is set synchronously, the iframe after a SW ping.
+      options.downloadId = '555';
+      setTimeout(() => (w.document.createElement('iframe').src = 'd/555'), 0);
+      return Promise.resolve();
+    },
+  };
+  await sleep(600);
+  w.appDownloadManager.downloadToDisc({ media: { _: 'document', id: '9001' } });
+  await waitFor(() => dl.msgs().some((m) => m.phase === 'end'));
+  assert(dl.msgs()[0].doc === '9001', 'start message: ' + JSON.stringify(dl.msgs()[0]));
+});
+
+check('tapping a saved document opens it instead of downloading again', () => {
+  const dl = dlBoot(() => new Response(''));
+  const doc = dl.window.document;
+  doc.body.innerHTML =
+    '<div class="document ext-apk" data-doc-id="42"><div class="document-ico"><div class="preloader-container"></div></div></div>' +
+    '<div class="document ext-zip" data-doc-id="43"></div>' +
+    '<div class="bubbles is-selecting"><div class="document" data-doc-id="44"></div></div>';
+  const reached = [];
+  for (const el of doc.querySelectorAll('.document')) {
+    el.addEventListener('mousedown', () => reached.push(el.dataset.docId));
+    el.addEventListener('click', () => reached.push(el.dataset.docId));
+  }
+  dl.window.__unhook.savedDocs(['42', '44']);
+  const saved = doc.querySelector('[data-doc-id="42"]');
+  assert(saved.hasAttribute('data-unhook-saved'), 'saved document not marked');
+  assert(dl.css().includes('[data-unhook-saved] .preloader-container'), 'no style for saved documents');
+  const tap = (el) => {
+    const down = new dl.window.MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    el.dispatchEvent(down);
+    el.dispatchEvent(new dl.window.MouseEvent('click', { bubbles: true, cancelable: true }));
+    return down;
+  };
+  const down = tap(saved.querySelector('.preloader-container'));
+  assert(down.defaultPrevented, 'tap not taken over');
+  const opens = dl.msgs().filter((m) => m.phase === 'open');
+  assert(opens.length === 1 && opens[0].doc === '42', 'open messages: ' + JSON.stringify(opens));
+  tap(doc.querySelector('[data-doc-id="43"]'));
+  tap(doc.querySelector('[data-doc-id="44"]'));
+  assert(JSON.stringify(reached) === '["43","43","44","44"]', 'WebK saw: ' + JSON.stringify(reached));
+  assert(dl.msgs().filter((m) => m.phase === 'open').length === 1, 'unsaved or selecting tap opened a file');
+  dl.window.__unhook.savedDocs(['43'], true);
+  assert(doc.querySelector('[data-doc-id="43"]').hasAttribute('data-unhook-saved'), 'add did not mark');
+  dl.window.__unhook.savedDocs([]);
+  assert(!doc.querySelector('[data-unhook-saved]'), 'replace with nothing left marks behind');
+});
+
 console.log('\n-- rule params --');
 check('a paramMap is inert for profiles that declare no params', () =>
   assert(
@@ -1030,6 +1083,255 @@ check('the overlay goes away when the lock is switched off', async () => {
   assert(guard(d), 'setup: overlay should be up');
   d.window.eval(buildApplyCall(telegramProfile, { 'focus-folder': true }));
   assert(!guard(d), 'overlay survived the rule being disabled');
+});
+
+console.log('\n-- telegram focus lock: other folders --');
+const folderGuard = (d) => d.window.document.getElementById('__unhook_folder_guard');
+function folderBoot(enabled = LOCK, setup) {
+  const clicks = {};
+  const d = boot(TG_HTML, TG_URL, telegramProfile, enabled, {}, (w) => {
+    fakeWebK(w, { names: NAMES, myId: ME, folder: FOLDER });
+    wireTabs(w, clicks);
+    const doc = w.document;
+    const box = (top, height) => () => ({ top, left: 0, width: 400, height, right: 400, bottom: top + height });
+    const list = doc.getElementById('folders-container');
+    list.getBoundingClientRect = box(100, 600);
+    doc.querySelector('.folders-tabs-scrollable').getBoundingClientRect = box(56, 48);
+    doc.elementsFromPoint = () => [list];
+    if (setup) setup(w);
+  });
+  const tab = (id) => d.window.document.getElementById(id);
+  return { d, clicks, tab };
+}
+// The launch switch to the focus folder settles after 3 ticks of 400 ms.
+const FOCUS_SETTLE_MS = 1700;
+
+check('another folder is covered, the focus folder is not', async () => {
+  const { d, tab } = folderBoot();
+  await sleep(FOCUS_SETTLE_MS);
+  assert(tab('tab-focus').classList.contains('active'), 'setup: focus folder should be open');
+  assert(!folderGuard(d), 'covered the focus folder');
+  tab('tab-all').click();
+  await sleep(250);
+  const ov = folderGuard(d);
+  assert(ov, 'other folder left open');
+  assert(ov.style.top === '104px' && ov.style.height === '596px', `covers the tabs: top ${ov.style.top}, height ${ov.style.height}`);
+  assert(d.posted.some((m) => m.what === 'focus-lock-folder'), 'not reported');
+  tab('tab-focus').click();
+  await sleep(250);
+  assert(!folderGuard(d), 'overlay stayed on the focus folder');
+});
+
+check('"Back to focus" on a folder switches to the focus folder', async () => {
+  const { d, tab } = folderBoot();
+  await sleep(FOCUS_SETTLE_MS);
+  tab('tab-all').click();
+  await sleep(250);
+  folderGuard(d).querySelector('button').click();
+  assert(tab('tab-focus').classList.contains('active'), 'focus folder not opened');
+  await sleep(250);
+  assert(!folderGuard(d), 'overlay survived the button');
+});
+
+check('folders stay open without the lock, during search, and when the list is not showing', async () => {
+  const off = folderBoot({ 'focus-folder': true });
+  const search = folderBoot(LOCK, (w) => w.document.body.classList.add('is-search-active'));
+  const behind = folderBoot(LOCK, (w) => (w.document.elementsFromPoint = () => [w.document.body]));
+  await sleep(FOCUS_SETTLE_MS);
+  for (const b of [off, search, behind]) b.tab('tab-all').click();
+  await sleep(250);
+  assert(!folderGuard(off.d), 'covered with the lock off');
+  assert(!folderGuard(search.d), 'covered search results');
+  assert(!folderGuard(behind.d), 'covered something that is over the list');
+});
+
+console.log('\n-- telegram voice recording --');
+// WebK's own recorder (WebAudio + WebCodecs) is noisy in the WebView; the
+// bootstrap swaps in a MediaRecorder one and re-wraps its WebM Opus as Ogg.
+const ascii = (s) => [...s].map((c) => c.charCodeAt(0));
+function ebml(idHex, payload, unknown = false) {
+  const id = idHex.match(/../g).map((h) => parseInt(h, 16));
+  const size = [0x01];
+  for (let i = 6; i >= 0; i--) size.push(unknown ? 0xff : Math.floor(payload.length / 2 ** (8 * i)) & 255);
+  return [...id, ...size, ...payload];
+}
+const OPUS_HEAD = [...ascii('OpusHead'), 1, 1, 0x38, 0x01, 0x80, 0xbb, 0, 0, 0, 0, 0];
+// TOC 0xf8: CELT 20 ms, one frame (960 samples). 0xfb + 0x03: three frames.
+const VOICE_PACKETS = [
+  [0xf8, ...new Array(80).fill(1)],
+  [0xf8, ...new Array(299).fill(2)],
+  [0xfb, 0x03, ...new Array(40).fill(3)],
+  [0xf8, 4, 5, 6],
+];
+const VOICE_SAMPLES = 960 * 3 + 2880;
+function voiceWebm() {
+  const blocks = VOICE_PACKETS.map((p, i) => ebml('A3', [0x81, 0, i, 0x80, ...p]));
+  const track = ebml('AE', [
+    ...ebml('D7', [1]),
+    ...ebml('86', ascii('A_OPUS')),
+    ...ebml('63A2', OPUS_HEAD),
+    ...ebml('E1', ebml('9F', [1])),
+  ]);
+  // Chrome writes Segment and Cluster with unknown sizes while recording.
+  const segment = [
+    ...ebml('1549A966', ebml('2AD7B1', [0x0f, 0x42, 0x40])),
+    ...ebml('1654AE6B', track),
+    ...ebml('1F43B675', [...ebml('E7', [0]), ...blocks.flat()], true),
+  ];
+  return new Uint8Array([...ebml('1A45DFA3', ebml('4282', ascii('webm'))), ...ebml('18538067', segment, true)]);
+}
+// An Ogg reader written independently of the bootstrap's writer, including
+// a bit-by-bit CRC.
+function crcBitwise(b) {
+  let c = 0;
+  for (const x of b) {
+    c ^= x << 24;
+    for (let k = 0; k < 8; k++) c = c & 0x80000000 ? (c << 1) ^ 0x04c11db7 : c << 1;
+  }
+  return c >>> 0;
+}
+function readOgg(buf) {
+  const b = Buffer.from(buf);
+  const pages = [];
+  const packets = [];
+  let cur = [];
+  let p = 0;
+  while (p < b.length) {
+    assert(b.toString('latin1', p, p + 4) === 'OggS', 'no capture pattern at ' + p);
+    const nseg = b[p + 26];
+    const lacing = [...b.subarray(p + 27, p + 27 + nseg)];
+    const bodyLen = lacing.reduce((a, x) => a + x, 0);
+    const page = Buffer.from(b.subarray(p, p + 27 + nseg + bodyLen));
+    const crc = page.readUInt32LE(22);
+    page.writeUInt32LE(0, 22);
+    assert(crcBitwise(page) === crc, 'bad CRC on page ' + pages.length);
+    pages.push({ flags: b[p + 5], granule: Number(b.readBigUInt64LE(p + 6)), seq: b.readUInt32LE(p + 18) });
+    let q = p + 27 + nseg;
+    for (const l of lacing) {
+      cur.push(...b.subarray(q, q + l));
+      q += l;
+      if (l < 255) {
+        packets.push(cur);
+        cur = [];
+      }
+    }
+    p = q;
+  }
+  return { pages, packets };
+}
+function voiceBoot(url = TG_URL, profile = telegramProfile) {
+  const feed = [];
+  const env = { stopped: 0, recorders: [], constraints: [] };
+  const d = boot('<html><head></head><body></body></html>', url, profile, {}, {}, (w) => {
+    w.AudioEncoder = function AudioEncoder() {};
+    w.navigator.mediaDevices = {
+      getUserMedia: (c) => {
+        env.constraints.push(c.audio);
+        if (c.audio !== true) return Promise.reject(Object.assign(new Error('gone'), { name: 'OverconstrainedError' }));
+        return Promise.resolve({ getTracks: () => [{ stop: () => env.stopped++ }] });
+      },
+    };
+    w.AudioContext = class {
+      constructor() {
+        this.state = 'running';
+      }
+      createMediaStreamSource() {
+        return { context: this };
+      }
+      close() {
+        this.state = 'closed';
+        return Promise.resolve();
+      }
+    };
+    w.MediaRecorder = class {
+      static isTypeSupported(t) {
+        return t === 'audio/webm;codecs=opus';
+      }
+      constructor(stream, opts) {
+        this.opts = opts;
+        this.state = 'inactive';
+        env.recorders.push(this);
+      }
+      start() {
+        this.state = 'recording';
+      }
+      pause() {
+        this.state = 'paused';
+      }
+      resume() {
+        this.state = 'recording';
+      }
+      emit() {
+        const data = feed.shift() || new Uint8Array(0);
+        setTimeout(() => this.ondataavailable({ data: new w.Blob([data]) }), 0);
+      }
+      requestData() {
+        this.emit();
+      }
+      stop() {
+        this.emit();
+        this.state = 'inactive';
+        setTimeout(() => this.onstop && this.onstop(), 0);
+      }
+    };
+  });
+  return { ...d, feed, env };
+}
+
+check('voice notes record through MediaRecorder and come out as valid Ogg Opus', async () => {
+  const v = voiceBoot();
+  const w = v.window;
+  assert(typeof w.AudioEncoder === 'undefined', 'AudioEncoder still visible to WebK');
+  const R = w.Recorder;
+  w.Recorder = function Vendor() {};
+  assert(w.Recorder === R && typeof R === 'function', 'WebK could replace the recorder');
+
+  const webm = voiceWebm();
+  // Cut mid-cluster, as a MediaRecorder timeslice would.
+  const cut = webm.length - 30;
+  v.feed.push(webm.subarray(0, cut), webm.subarray(cut));
+  const rec = new R({ encoderSampleRate: 48000, numberOfChannels: 1 });
+  const events = [];
+  rec.onstart = () => events.push('start');
+  rec.onpause = () => events.push('pause');
+  rec.onstop = () => events.push('stop');
+  let ogg;
+  rec.ondataavailable = (b) => {
+    events.push('data');
+    ogg = b;
+  };
+  rec.setMicrophoneId('a-mic-that-was-unplugged');
+  await rec.start();
+  assert(JSON.stringify(v.env.constraints) === '[{"deviceId":{"exact":"a-mic-that-was-unplugged"}},true]',
+    'no fallback to the default mic: ' + JSON.stringify(v.env.constraints));
+  assert(rec.sourceNode && rec.sourceNode.context, 'no sourceNode for the waveform');
+  assert(v.env.recorders[0].opts.mimeType === 'audio/webm;codecs=opus', 'mime ' + v.env.recorders[0].opts.mimeType);
+
+  await rec.pause();
+  const snap = readOgg(rec.getSnapshot());
+  assert(snap.packets.length >= 3 && snap.packets.length < VOICE_PACKETS.length + 2,
+    'snapshot packets ' + snap.packets.length);
+  rec.resume();
+  await rec.stop();
+  assert(JSON.stringify(events) === '["start","pause","data","stop"]', 'events ' + JSON.stringify(events));
+  assert(v.env.stopped === 1, 'mic left on');
+
+  const { pages, packets } = readOgg(ogg);
+  assert(pages[0].flags === 2 && pages[0].granule === 0, 'first page not BOS: ' + JSON.stringify(pages[0]));
+  assert(JSON.stringify(packets[0]) === JSON.stringify(OPUS_HEAD), 'OpusHead not carried over');
+  assert(Buffer.from(packets[1].slice(0, 8)).toString() === 'OpusTags', 'no OpusTags');
+  const audio = packets.slice(2);
+  assert(JSON.stringify(audio) === JSON.stringify(VOICE_PACKETS), 'audio packets changed');
+  const last = pages[pages.length - 1];
+  assert(last.flags === 4, 'last page not EOS');
+  assert(last.granule === VOICE_SAMPLES, 'granule ' + last.granule + ' != ' + VOICE_SAMPLES);
+  assert(pages.every((pg, i) => pg.seq === i), 'page sequence broken');
+});
+
+check('other sites keep their recorder', () => {
+  const v = voiceBoot('https://m.youtube.com/', youtubeProfile);
+  assert(typeof v.window.AudioEncoder === 'function', 'AudioEncoder hidden on youtube');
+  assert(v.window.Recorder === undefined, 'Recorder defined on youtube');
 });
 
 console.log('\n-- shouldLoad navigation policy --');

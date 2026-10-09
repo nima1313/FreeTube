@@ -49,7 +49,9 @@ const VARIANTS: Record<string, Variant> = {
     // Teal, not Telegram's blue: FreeTube already owns the pale blue above, and
     // this colour is the only thing telling the launcher icons apart.
     iconBackground: '#D7F0EA',
-    permissions: MEDIA_CAPTURE,
+    // Tapping a downloaded APK hands it to Android's installer, which refuses
+    // apps that don't declare this ("install unknown apps" is then asked once).
+    permissions: [...MEDIA_CAPTURE, 'android.permission.REQUEST_INSTALL_PACKAGES'],
   },
 };
 

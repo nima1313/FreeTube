@@ -9,7 +9,7 @@ import React, {
 } from 'react';
 import { AppState, BackHandler, StyleSheet, View } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
-import { DownloadMessage, handleDownloadMessage } from '../device/downloads';
+import { DownloadMessage, handleDownloadMessage, syncSavedDocs } from '../device/downloads';
 import { setFullscreenOrientation, setKeepAwake } from '../device/screen';
 import { activeBlockedPaths, buildApplyCall, buildBootstrap, buildDebugCall } from '../filters/buildInjection';
 import { EnabledMap, ParamMap, SiteProfile } from '../filters/types';
@@ -77,6 +77,8 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
     return () => sub.remove();
   }, []);
 
+  const inject = useCallback((js: string) => webviewRef.current?.injectJavaScript(js), []);
+
   const setPlaying = useCallback((playing: boolean) => {
     if (playing === awake.current) return;
     awake.current = playing;
@@ -93,10 +95,13 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
         // here; the page's poll re-arms it if playback is still running when
         // we come back.
         setPlaying(false);
+      } else if (state === 'active') {
+        // A saved file may have been deleted in the Files app meanwhile.
+        syncSavedDocs(inject);
       }
     });
     return () => sub.remove();
-  }, [setPlaying]);
+  }, [setPlaying, inject]);
 
   // Nothing else releases these if the screen goes away mid-video.
   useEffect(
@@ -122,13 +127,13 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
       else if (msg.type === 'fullscreen') setFullscreenOrientation(!!msg.on);
       else if (msg.type === 'download') {
         // Also load-bearing. Returns before the log: a chunk is ~700KB of base64.
-        handleDownloadMessage(msg as DownloadMessage);
+        handleDownloadMessage(msg as DownloadMessage, inject);
         if (__DEV__ && msg.phase !== 'chunk') console.log('[unhook] download', msg.phase);
         return;
       }
       if (__DEV__) console.log('[unhook]', msg);
     },
-    [setPlaying]
+    [setPlaying, inject]
   );
 
   return (
@@ -157,7 +162,10 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
         // path — it's the one that avoids a flash of unfiltered content.
         injectedJavaScriptBeforeContentLoaded={bootstrap}
         injectedJavaScript={bootstrap}
-        onLoadEnd={() => webviewRef.current?.injectJavaScript(bootstrap)}
+        onLoadEnd={() => {
+          webviewRef.current?.injectJavaScript(bootstrap);
+          syncSavedDocs(inject);
+        }}
         onShouldStartLoadWithRequest={(req) =>
           shouldLoad(req, {
             allowedHosts: profile.allowedHosts,
