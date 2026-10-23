@@ -10,11 +10,12 @@
 // Run: node scripts/check-injection.mjs
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import ts from 'typescript';
 
 const require = createRequire(import.meta.url);
-const root = join(dirname(new URL(import.meta.url).pathname), '..');
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const out = '/tmp/unhook-check';
 
 const files = [
