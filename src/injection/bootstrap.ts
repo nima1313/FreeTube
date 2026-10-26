@@ -1773,6 +1773,35 @@ export const BOOTSTRAP_TEMPLATE = `
     });
   };
 
+  // --- Photo uploads: encode once -------------------------------------------
+  // Before WebK shows a picked photo it shrinks it to 2560px and encodes a
+  // JPEG at quality 1. For a phone photo that comes out at ~8 MB, over WebK's
+  // 6 MB limit, so it decodes and encodes the whole photo a second time at
+  // 0.9 — every photo, every time, all before the "Send Photo" popup can show.
+  // Encoding big JPEGs at 0.9 straight away skips the wasted round. Telegram
+  // re-compresses photos on its servers anyway, so what is sent looks the same.
+  var PHOTO_QUALITY = 0.9;
+  var PHOTO_MIN_SIDE = 1280;
+
+  (function () {
+    if (location.hostname !== 'web.telegram.org') return;
+    var proto = window.HTMLCanvasElement && HTMLCanvasElement.prototype;
+    if (!proto || !proto.toBlob || proto.toBlob.__unhook) return;
+    var toBlob = proto.toBlob;
+    var wrapped = function (cb, type, quality) {
+      if (
+        String(type).toLowerCase() === 'image/jpeg' &&
+        (quality === undefined || quality > PHOTO_QUALITY) &&
+        Math.max(this.width, this.height) >= PHOTO_MIN_SIDE
+      ) {
+        return toBlob.call(this, cb, type, PHOTO_QUALITY);
+      }
+      return toBlob.apply(this, arguments);
+    };
+    wrapped.__unhook = true;
+    proto.toBlob = wrapped;
+  })();
+
   // --- Video notes: switch camera --------------------------------------------
   // The Telegram app can flip between the front and back camera while a video
   // note records; WebK opens one camera and has no switch. So WebK's camera
@@ -1947,17 +1976,28 @@ export const BOOTSTRAP_TEMPLATE = `
           'background:rgba(0,0,0,0.55);touch-action:manipulation;'
       );
       // WebK must not see these: a stray tap can end or cancel the recording.
+      // That preventDefault also stops a touch from ever becoming a click,
+      // so the flip happens on the release of the touch itself; click only
+      // covers a mouse, and the timestamp keeps one tap to one flip.
+      var flippedAt = 0;
+      var flip = function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var now = Date.now();
+        if (now - flippedAt < 400) return;
+        flippedAt = now;
+        if (camRig) flipCamera(camRig);
+      };
       var swallow = function (e) {
         e.preventDefault();
         e.stopPropagation();
       };
-      ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend'].forEach(function (type) {
+      ['pointerdown', 'mousedown', 'mouseup', 'touchstart'].forEach(function (type) {
         b.addEventListener(type, swallow);
       });
-      b.addEventListener('click', function (e) {
-        swallow(e);
-        if (camRig) flipCamera(camRig);
-      });
+      b.addEventListener(window.PointerEvent ? 'pointerup' : 'touchend', flip);
+      if (window.PointerEvent) b.addEventListener('touchend', swallow);
+      b.addEventListener('click', flip);
       (document.body || document.documentElement).appendChild(b);
     }
     var r = circle.getBoundingClientRect();

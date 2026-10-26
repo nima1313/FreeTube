@@ -1518,9 +1518,16 @@ check('video notes can switch camera mid-recording', async () => {
   assert(camBtn(d), 'no switch-camera button while recording');
   assert(d.window.document.documentElement.getAttribute('data-unhook-cam') === 'user', 'facing not tracked');
 
-  camBtn(d).click();
+  // A finger, not a mouse: on a phone the touch never becomes a click.
+  const tap = (type) => camBtn(d).dispatchEvent(new d.window.Event(type, { bubbles: true, cancelable: true }));
+  tap(d.window.PointerEvent ? 'pointerdown' : 'touchstart');
+  tap(d.window.PointerEvent ? 'pointerup' : 'touchend');
   await sleep(50);
   assert(JSON.stringify(d.env.opened.map((o) => o.facing)) === '["user","environment"]', 'opened ' + JSON.stringify(d.env.opened));
+  // The same tap's click, if a browser sends one, must not flip it back.
+  camBtn(d).click();
+  await sleep(50);
+  assert(d.env.opened.length === 2, 'one tap flipped twice');
   assert(d.env.maxOpen === 1, 'two cameras open at once');
   assert(!d.env.opened[1].audio, 'the switch reopened the microphone');
   assert(d.window.document.documentElement.getAttribute('data-unhook-cam') === 'environment', 'not marked as back camera');
@@ -1555,6 +1562,23 @@ check('calls get the camera untouched', async () => {
     video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: true,
   });
   assert(stream.getVideoTracks()[0].facing === 'user', 'a call got the canvas track');
+});
+
+check('big photos are encoded once, at 0.9', () => {
+  const calls = [];
+  const d = boot(TG_HTML, TG_URL, telegramProfile, {}, {}, (w) => {
+    w.HTMLCanvasElement.prototype.toBlob = function (cb, type, q) {
+      calls.push([this.width, type, q]);
+    };
+  });
+  const canvas = (w, h) => Object.assign(d.window.document.createElement('canvas'), { width: w, height: h });
+  canvas(2560, 1920).toBlob(() => {}, 'image/jpeg', 1);
+  canvas(1920, 2560).toBlob(() => {}, 'image/jpeg');
+  canvas(2560, 1920).toBlob(() => {}, 'image/jpeg', 0.8);
+  canvas(320, 240).toBlob(() => {}, 'image/jpeg', 1);
+  canvas(2560, 1920).toBlob(() => {}, 'image/png');
+  const want = [[2560, 'image/jpeg', 0.9], [1920, 'image/jpeg', 0.9], [2560, 'image/jpeg', 0.8], [320, 'image/jpeg', 1], [2560, 'image/png', undefined]];
+  assert(JSON.stringify(calls) === JSON.stringify(want), JSON.stringify(calls));
 });
 
 check('other sites keep their recorder', () => {

@@ -200,7 +200,9 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
         allowsFullscreenVideo
         mediaPlaybackRequiresUserAction={false}
         allowsBackForwardNavigationGestures
-        webviewDebuggingEnabled={__DEV__}
+        // EXPO_PUBLIC_WEBVIEW_DEBUG=1 at build time opens a release build to
+        // chrome://inspect too, for profiling on a phone or emulator.
+        webviewDebuggingEnabled={__DEV__ || process.env.EXPO_PUBLIC_WEBVIEW_DEBUG === '1'}
         // injectedJavaScriptBeforeContentLoaded is documented as "not 100%
         // reliable" on Android; when it missed, no filtering ran at all. The
         // bootstrap is idempotent (it re-applies through window.__unhook if

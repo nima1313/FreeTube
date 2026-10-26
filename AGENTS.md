@@ -198,6 +198,9 @@ stream whose video track is a 720px square canvas fed from the real camera
 behind it (old one stopped first — phones can't open two) and WebK records
 on undisturbed. WebK always mirrors the preview, so
 `html[data-unhook-cam="environment"]` turns that off for the back camera.
+The button flips on `pointerup` (and on `click`, deduped): WebK's recorder
+eats the touch otherwise, and `preventDefault` on `touchstart` would cancel
+the click.
 
 # File uploads
 
@@ -208,6 +211,12 @@ app holds CAMERA (FreeTele/FreeGram do, for video messages), which puts a slow
 open Android's photo picker (`ACTION_PICK_IMAGES`, API 33+), anything else
 `ACTION_GET_CONTENT`; the page's callback is always answered. The camera is no
 longer offered from the attach menu (video notes don't need it).
+
+Before the "Send Photo" popup appears, WebK scales a photo to 2560px and
+encodes it as JPEG at quality 1 (~8 MB for a phone photo), finds it over its
+6 MB limit, and decodes and encodes it all over again at 0.9. The bootstrap
+caps big (>= 1280px) JPEG `canvas.toBlob` calls on web.telegram.org at 0.9,
+so that happens once: on the emulator a 12 MP photo went from 2.1s to 1.3s.
 
 # Device behavior (screen wake + rotation)
 
@@ -223,6 +232,11 @@ don't move them back behind the `__DEV__` guard.
 Fullscreen has to force landscape rather than unlock rotation:
 react-native-webview only sets the activity to `SCREEN_ORIENTATION_UNSPECIFIED`,
 which obeys the phone's auto-rotate switch and does nothing when it is off.
+
+# Debugging a release build
+
+`EXPO_PUBLIC_WEBVIEW_DEBUG=1` at build time turns on WebView debugging
+(`chrome://inspect`) in a release APK; dev builds always have it.
 
 # Verification without a device
 
