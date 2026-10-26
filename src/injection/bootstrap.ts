@@ -725,6 +725,17 @@ export const BOOTSTRAP_TEMPLATE = `
   var guardPeer = null;
   var guardToken = 0;
 
+  // A short, deliberate way out: the overlay's "1 minute" button lifts both
+  // locks until breakUntil, with a countdown on screen, and then they come
+  // back by themselves. The break is gone on reload, which only locks sooner.
+  var BREAK_MS = 60 * 1000;
+  var BREAK_ID = '__unhook_break';
+  var breakUntil = 0;
+
+  function onBreak() {
+    return Date.now() < breakUntil;
+  }
+
   // The chat on screen, or 0. On a phone-width layout WebK closes a chat by
   // sliding back to the list without clearing chat.peerId, so the peer alone
   // would keep judging a chat the user already left. tabId (0 = chat list,
@@ -837,19 +848,68 @@ export const BOOTSTRAP_TEMPLATE = `
       onBack();
     });
 
+    var pause = document.createElement('button');
+    pause.textContent = 'Unlock for 1 minute';
+    pause.setAttribute(
+      'style',
+      'display:block;margin:14px auto 0;background:none;color:#fff;opacity:0.7;' +
+        'border:1px solid rgba(255,255,255,0.35);border-radius:20px;' +
+        'padding:8px 16px;font:13px system-ui,sans-serif;'
+    );
+    pause.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      startBreak();
+    });
+
     box.appendChild(icon);
     box.appendChild(heading);
     box.appendChild(sub);
     box.appendChild(btn);
+    box.appendChild(pause);
     ov.appendChild(box);
     host.appendChild(ov);
     return ov;
   }
 
+  function startBreak() {
+    breakUntil = Date.now() + BREAK_MS;
+    removeGuard();
+    removeFolderGuard();
+    showBreak();
+    post({ type: 'action', what: 'focus-break' });
+  }
+
+  // The countdown pill. It ignores touches, so nothing under it is blocked.
+  function showBreak() {
+    var pill = document.getElementById(BREAK_ID);
+    if (!onBreak() || !actionEnabled('focusLock')) {
+      if (pill && pill.parentNode) pill.parentNode.removeChild(pill);
+      return;
+    }
+    if (!pill) {
+      var host = document.body || document.documentElement;
+      if (!host) return;
+      pill = document.createElement('div');
+      pill.id = BREAK_ID;
+      pill.setAttribute(
+        'style',
+        'position:fixed;z-index:2147483001;bottom:84px;left:50%;transform:translateX(-50%);' +
+          'pointer-events:none;background:rgba(24,34,45,0.9);color:#fff;' +
+          'border-radius:16px;padding:6px 14px;font:13px/1.4 system-ui,sans-serif;'
+      );
+      host.appendChild(pill);
+    }
+    var left = Math.ceil((breakUntil - Date.now()) / 1000);
+    var sec = left % 60;
+    var text = 'Focus Mode back in ' + Math.floor(left / 60) + ':' + (sec < 10 ? '0' : '') + sec;
+    if (pill.textContent !== text) pill.textContent = text;
+  }
+
   // Re-evaluates when the open chat changes, or always when force is set
   // (after a settings change).
   function checkGuard(force) {
-    var peerId = actionEnabled('focusLock') ? openPeerId() : 0;
+    var peerId = actionEnabled('focusLock') && !onBreak() ? openPeerId() : 0;
     if (!peerId) {
       guardPeer = null;
       guardToken++;
@@ -921,7 +981,7 @@ export const BOOTSTRAP_TEMPLATE = `
 
   // The folder overlay's box, or null when it shouldn't show at all.
   function folderGuardRect() {
-    if (!actionEnabled('focusLock') || !actionEnabled('focusFolder')) return null;
+    if (!actionEnabled('focusLock') || !actionEnabled('focusFolder') || onBreak()) return null;
     var name = normLabel(actionParam('focusFolder'));
     // Still switching to the focus folder after launch: don't flash.
     if (!name || focusTimer) return null;
@@ -976,6 +1036,7 @@ export const BOOTSTRAP_TEMPLATE = `
     setInterval(function () {
       if (actionEnabled('focusLock') && window.appImManager) checkGuard(false);
       checkFolderGuard();
+      showBreak();
     }, GUARD_TICK_MS);
   }
 
@@ -1265,6 +1326,50 @@ export const BOOTSTRAP_TEMPLATE = `
     markSavedDocs();
   }, 500);
 
+  // --- Downloads: keep media ------------------------------------------------
+  // What WebK downloads inside a chat (music, files, videos under 20 MB) lives
+  // in its own cache, not in the phone's Downloads folder, and WebK deletes
+  // anything cached more than a week ago: its "Clear cache older than"
+  // setting (Settings > Data and Storage) defaults to 1 week. So music played
+  // last week has to download again, as if it had never been saved. The
+  // Telegram app keeps downloads until you clear them, so the 1-week default
+  // is raised to a year, the longest WebK offers. Any other value was the
+  // user's own choice and stays.
+
+  var CACHE_TTL_DEFAULT = 7 * 86400;
+  var CACHE_TTL_KEEP = 365 * 86400;
+  var keepMediaDone = false;
+
+  function keepMedia() {
+    var dm = window.appDialogsManager;
+    var sm = dm && dm.managers && dm.managers.appStateManager;
+    if (keepMediaDone || !sm || typeof sm.getState !== 'function') return;
+    keepMediaDone = true;
+    Promise.resolve(sm.getState())
+      .then(function (st) {
+        var ttl = st && st.settings && st.settings.cacheTTL;
+        if (ttl !== CACHE_TTL_DEFAULT) return;
+        return Promise.resolve(sm.setByKey('settings.cacheTTL', CACHE_TTL_KEEP)).then(function () {
+          post({ type: 'action', what: 'keep-media' });
+        });
+      })
+      .catch(function (e) {
+        console.warn('[unhook] could not extend the media cache', e);
+      });
+    // Asks the WebView not to clear the site's storage when the phone runs
+    // low on space. A WebView may say no; nothing else depends on it.
+    try {
+      if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () {});
+    } catch (e) {}
+  }
+
+  if (location.hostname === 'web.telegram.org') {
+    var keepMediaTimer = setInterval(function () {
+      keepMedia();
+      if (keepMediaDone) clearInterval(keepMediaTimer);
+    }, 1000);
+  }
+
   // --- Voice messages -------------------------------------------------------
   // WebK records voice notes through WebAudio (an AudioWorklet tapping the
   // mic) into a WebCodecs AudioEncoder. In the Android WebView that comes out
@@ -1278,6 +1383,24 @@ export const BOOTSTRAP_TEMPLATE = `
   // are re-wrapped (not re-encoded) by webmToOgg.
 
   var VOICE_MIME = 'audio/webm;codecs=opus';
+  // Twice WebK's 32 kbps: speech stays clear instead of merely intelligible.
+  var VOICE_BITRATE = 64000;
+
+  // Chrome's defaults are tuned for calls. A voice or video note is spoken
+  // close to the mic with nothing playing, and two of them only hurt it: echo
+  // cancellation puts Android's mic into its phone-call mode (narrowband and
+  // tinny), and gain control pumps the level up and down between words.
+  // Noise suppression stays; it runs in software at full bandwidth.
+  var NOTE_AUDIO = { echoCancellation: false, autoGainControl: false, noiseSuppression: true, channelCount: 1 };
+
+  // NOTE_AUDIO plus whatever the caller asked for (a microphone deviceId).
+  function noteAudio(audio) {
+    var c = {};
+    var k;
+    if (audio && typeof audio === 'object') for (k in audio) c[k] = audio[k];
+    for (k in NOTE_AUDIO) c[k] = NOTE_AUDIO[k];
+    return c;
+  }
 
   // An EBML variable-length integer at p. With marker set the length bits are
   // kept, which is how element ids are written. unknown: all value bits set,
@@ -1536,11 +1659,11 @@ export const BOOTSTRAP_TEMPLATE = `
     var md = navigator.mediaDevices;
     var mic = self.mic;
     return md
-      .getUserMedia({ audio: mic })
+      .getUserMedia({ audio: noteAudio(mic) })
       .catch(function (e) {
         // The microphone picked in Telegram's settings is gone: use the default.
         if (mic !== true && e && (e.name === 'OverconstrainedError' || e.name === 'NotFoundError')) {
-          return md.getUserMedia({ audio: true });
+          return md.getUserMedia({ audio: noteAudio(true) });
         }
         throw e;
       })
@@ -1554,7 +1677,7 @@ export const BOOTSTRAP_TEMPLATE = `
           self.audioContext = new AC();
           self.sourceNode = self.audioContext.createMediaStreamSource(stream);
           if (self.audioContext.state === 'suspended') self.audioContext.resume().catch(function () {});
-          var mr = (self.mr = new MediaRecorder(stream, { mimeType: VOICE_MIME, audioBitsPerSecond: 32000 }));
+          var mr = (self.mr = new MediaRecorder(stream, { mimeType: VOICE_MIME, audioBitsPerSecond: VOICE_BITRATE }));
           mr.ondataavailable = function (e) {
             self.take(e.data);
           };
@@ -1658,6 +1781,35 @@ export const BOOTSTRAP_TEMPLATE = `
       }
     });
   };
+
+  // Video notes are WebK's own recorder, which asks for a square camera
+  // (ideal width === ideal height) — calls ask for 16:9 and keep the call
+  // processing they need. The mic of a video note gets NOTE_AUDIO too.
+  function isVideoNote(c) {
+    var v = c && c.video;
+    if (!v || typeof v !== 'object' || !c.audio) return false;
+    var w = v.width && typeof v.width === 'object' ? v.width.ideal : v.width;
+    var h = v.height && typeof v.height === 'object' ? v.height.ideal : v.height;
+    return !!w && w === h;
+  }
+
+  (function () {
+    if (location.hostname !== 'web.telegram.org') return;
+    var md = navigator.mediaDevices;
+    if (!md || typeof md.getUserMedia !== 'function' || md.getUserMedia.__unhook) return;
+    var orig = md.getUserMedia;
+    var wrapped = function (c) {
+      if (isVideoNote(c)) {
+        var copy = {};
+        for (var k in c) copy[k] = c[k];
+        copy.audio = noteAudio(c.audio);
+        c = copy;
+      }
+      return orig.call(this, c);
+    };
+    wrapped.__unhook = true;
+    md.getUserMedia = wrapped;
+  })();
 
   (function () {
     if (location.hostname !== 'web.telegram.org') return;

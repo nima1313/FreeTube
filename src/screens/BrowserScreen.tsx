@@ -7,14 +7,14 @@ import React, {
   useMemo,
   useRef,
 } from 'react';
-import { AppState, BackHandler, StyleSheet, View } from 'react-native';
+import { AppState, BackHandler, Linking, StyleSheet, View } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 import { DownloadMessage, handleDownloadMessage, syncSavedDocs } from '../device/downloads';
 import { setFullscreenOrientation, setKeepAwake } from '../device/screen';
 import { activeBlockedPaths, buildApplyCall, buildBootstrap, buildDebugCall } from '../filters/buildInjection';
 import { EnabledMap, ParamMap, SiteProfile } from '../filters/types';
 import { USER_AGENT } from '../webview/constants';
-import { shouldLoad } from '../webview/navigation';
+import { externalTarget, LoadPolicy, LoadRequest, shouldLoad } from '../webview/navigation';
 
 export interface BrowserHandle {
   /** Returns true if the WebView consumed the back press. */
@@ -76,6 +76,35 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
     });
     return () => sub.remove();
   }, []);
+
+  // The last link handed to another app, so a navigation reported twice opens
+  // it once.
+  const lastHandoff = useRef({ url: '', at: 0 });
+
+  const onShouldStart = useCallback(
+    (req: LoadRequest) => {
+      const policy: LoadPolicy = {
+        allowedHosts: profile.allowedHosts,
+        blockedPathPatterns: activeBlockedPaths(profile, enabledRef.current),
+        blockedSchemes: profile.blockedSchemes,
+      };
+      if (shouldLoad(req, policy)) return true;
+      const target = profile.openExternalLinks ? externalTarget(req.url, policy) : null;
+      if (target) {
+        const now = Date.now();
+        const last = lastHandoff.current;
+        if (last.url !== req.url || now - last.at > 1500) {
+          lastHandoff.current = { url: req.url, at: now };
+          Linking.openURL(target).catch(() => {
+            // No app for geo: — let the maps link open in the browser instead.
+            if (target !== req.url) Linking.openURL(req.url).catch(() => {});
+          });
+        }
+      }
+      return false;
+    },
+    [profile]
+  );
 
   const inject = useCallback((js: string) => webviewRef.current?.injectJavaScript(js), []);
 
@@ -166,13 +195,7 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
           webviewRef.current?.injectJavaScript(bootstrap);
           syncSavedDocs(inject);
         }}
-        onShouldStartLoadWithRequest={(req) =>
-          shouldLoad(req, {
-            allowedHosts: profile.allowedHosts,
-            blockedPathPatterns: activeBlockedPaths(profile, enabledRef.current),
-            blockedSchemes: profile.blockedSchemes,
-          })
-        }
+        onShouldStartLoadWithRequest={onShouldStart}
         onNavigationStateChange={(nav) => {
           canGoBack.current = nav.canGoBack;
           // Leaving a page kills its <video> without a pause event, which would

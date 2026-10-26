@@ -82,9 +82,22 @@ rules carry on:
   focus folder is still running, during search (`.is-search-active`), while a
   WebK menu is open (`.btn-menu.active`), and whenever `elementsFromPoint` says
   something else (settings, a popup, an open chat) is over the list.
+  The overlays' second button, **Unlock for 1 minute**, lifts both locks for
+  60s with a countdown pill (`__unhook_break`, `pointer-events:none`); they
+  return by themselves when it runs out. The break lives only in the page, so
+  a reload ends it early.
 - **Hide the menu button** must not hide `.animated-menu-icon.state-back`: the
   same element draws the back arrow that closes search, and with the search
   bar also hidden, search mode is otherwise a blank column with no way out.
+
+**Links** to other sites do nothing inside the WebView (`shouldLoad` refuses
+them), so with `openExternalLinks` on the profile (Telegram only)
+`BrowserScreen` hands them to Android instead: `externalTarget` in
+`src/webview/navigation.ts` allows http(s) off the allowed hosts plus
+`mailto:`/`tel:`/`sms:`/`geo:`, never a blocked scheme and never a page of the
+site itself (that would undo a blocked path). A location message is a
+`maps.google.com/maps?q=lat,lng` link; it becomes `geo:lat,lng?q=lat,lng` so
+any maps app can take it, falling back to the https link if none does.
 
 Session state lives in **IndexedDB + localStorage**, not cookies, so the
 `CookieManager` flushing in `BrowserScreen` does nothing here; persistence comes
@@ -133,6 +146,14 @@ files over 20 MB after every download). FreeTele declares
 `REQUEST_INSTALL_PACKAGES` because Android's installer rejects APKs opened from
 an app without it.
 
+What WebK downloads *inside* a chat (music, files and videos up to 20 MB) is
+a different thing: it lives in WebK's own CacheStorage, which its service
+worker prunes by age — "Clear cache older than" in Settings > Data and
+Storage, **1 week by default**. That is why played/downloaded music kept
+vanishing. The bootstrap raises an untouched 1-week setting to 1 year (the
+longest WebK offers) through `managers.appStateManager.setByKey
+('settings.cacheTTL', …)`, leaving any other value alone.
+
 # Voice messages (FreeTele)
 
 WebK records voice notes through WebAudio (an AudioWorklet) into a WebCodecs
@@ -142,7 +163,13 @@ when `AudioEncoder` exists, else `new window.Recorder(config)`. So on
 web.telegram.org the bootstrap hides `AudioEncoder` and makes `window.Recorder`
 an accessor returning its own MediaRecorder-based recorder (assignments are
 ignored). MediaRecorder only writes WebM, so `webmToOgg` re-wraps the Opus
-packets (no re-encoding) into the Ogg Opus Telegram expects. The cost: WebK's
+packets (no re-encoding) into the Ogg Opus Telegram expects. Voice notes record
+at 64 kbps with `NOTE_AUDIO` constraints: echo cancellation off (on Android it
+switches the mic to its narrowband phone-call mode) and gain control off; noise
+suppression stays. Video notes are WebK's own recorder, so the bootstrap wraps
+`getUserMedia` and applies `NOTE_AUDIO` to requests with a square camera
+(ideal width === height, as WebK's round-video recorder asks); calls ask for
+16:9 and keep their call processing. The cost: WebK's
 media editor sees no `AudioEncoder`, so edited videos can't keep their sound.
 
 # Device behavior (screen wake + rotation)

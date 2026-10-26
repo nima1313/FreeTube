@@ -44,7 +44,7 @@ const { telegramProfile } = require(join(out, 'src/filters/profiles/telegram.js'
 const { buildBootstrap, buildApplyCall, buildDebugCall, activeBlockedPaths } = require(
   join(out, 'src/filters/buildInjection.js')
 );
-const { shouldLoad } = require(join(out, 'src/webview/navigation.js'));
+const { shouldLoad, externalTarget } = require(join(out, 'src/webview/navigation.js'));
 
 let failures = 0;
 // Promise-returning checks used to be fire-and-forget: a rejection surfaced as
@@ -931,6 +931,30 @@ check('nothing is loaded while focus-folder is off', async () => {
   assert(!wk.calls.reloaded.length, 'loaded chats for a disabled rule');
 });
 
+console.log('\n-- telegram: keep downloaded media --');
+function cacheBoot(cacheTTL) {
+  const set = [];
+  const d = boot(TG_HTML, TG_URL, telegramProfile, {}, {}, (w) => {
+    fakeWebK(w, { names: NAMES, myId: ME });
+    w.appDialogsManager.managers.appStateManager = {
+      getState: () => Promise.resolve({ settings: { cacheTTL } }),
+      setByKey: (key, value) => {
+        set.push([key, value]);
+        return Promise.resolve();
+      },
+    };
+  });
+  return { d, set };
+}
+
+check("WebK's 1-week media cache becomes a year; a user's own choice stays", async () => {
+  const def = cacheBoot(7 * 86400);
+  const own = cacheBoot(14 * 86400);
+  await sleep(1300);
+  assert(JSON.stringify(def.set) === JSON.stringify([['settings.cacheTTL', 365 * 86400]]), 'default kept: ' + JSON.stringify(def.set));
+  assert(!own.set.length, "overrode the user's setting: " + JSON.stringify(own.set));
+});
+
 console.log('\n-- telegram focus lock --');
 const guard = (d) => d.window.document.getElementById('__unhook_guard');
 const LOCK = { 'focus-lock': true, 'focus-folder': true };
@@ -1086,6 +1110,30 @@ check('the overlay goes away when the lock is switched off', async () => {
   assert(!guard(d), 'overlay survived the rule being disabled');
 });
 
+// Moves the page's clock forward (the break is timed with Date.now).
+function skipAhead(w, ms) {
+  const now = w.Date.now.bind(w.Date);
+  w.Date.now = () => now() + ms;
+}
+const breakPill = (d) => d.window.document.getElementById('__unhook_break');
+const breakButton = (ov) => ov.querySelectorAll('button')[1];
+
+check('"Unlock for 1 minute" lifts the lock, then it comes back', async () => {
+  const { d } = lockBoot('Spam 7');
+  await sleep(250);
+  breakButton(guard(d)).click();
+  assert(!guard(d), 'overlay survived the break button');
+  await sleep(250);
+  assert(!guard(d), 'overlay came back during the break');
+  assert(/Focus Mode back in (1:00|0:[0-5]\d)$/.test(breakPill(d).textContent), 'countdown: ' + breakPill(d).textContent);
+  assert(breakPill(d).style.pointerEvents === 'none', 'countdown blocks taps');
+  assert(d.posted.some((m) => m.what === 'focus-break'), 'break not reported');
+  skipAhead(d.window, 61000);
+  await sleep(250);
+  assert(guard(d), 'lock did not come back after a minute');
+  assert(!breakPill(d), 'countdown outlived the break');
+});
+
 console.log('\n-- telegram focus lock: other folders --');
 const folderGuard = (d) => d.window.document.getElementById('__unhook_folder_guard');
 function folderBoot(enabled = LOCK, setup) {
@@ -1132,6 +1180,20 @@ check('"Back to focus" on a folder switches to the focus folder', async () => {
   assert(tab('tab-focus').classList.contains('active'), 'focus folder not opened');
   await sleep(250);
   assert(!folderGuard(d), 'overlay survived the button');
+});
+
+check('the break lifts the folder lock too', async () => {
+  const { d, tab } = folderBoot();
+  await sleep(FOCUS_SETTLE_MS);
+  tab('tab-all').click();
+  await sleep(250);
+  breakButton(folderGuard(d)).click();
+  await sleep(250);
+  assert(!folderGuard(d), 'other folder still covered during the break');
+  assert(tab('tab-all').classList.contains('active'), 'break switched folders');
+  skipAhead(d.window, 61000);
+  await sleep(250);
+  assert(folderGuard(d), 'folder lock did not come back');
 });
 
 check('folders stay open without the lock, during search, and when the list is not showing', async () => {
@@ -1228,7 +1290,7 @@ function voiceBoot(url = TG_URL, profile = telegramProfile) {
     w.navigator.mediaDevices = {
       getUserMedia: (c) => {
         env.constraints.push(c.audio);
-        if (c.audio !== true) return Promise.reject(Object.assign(new Error('gone'), { name: 'OverconstrainedError' }));
+        if (c.audio.deviceId) return Promise.reject(Object.assign(new Error('gone'), { name: 'OverconstrainedError' }));
         return Promise.resolve({ getTracks: () => [{ stop: () => env.stopped++ }] });
       },
     };
@@ -1303,8 +1365,15 @@ check('voice notes record through MediaRecorder and come out as valid Ogg Opus',
   };
   rec.setMicrophoneId('a-mic-that-was-unplugged');
   await rec.start();
-  assert(JSON.stringify(v.env.constraints) === '[{"deviceId":{"exact":"a-mic-that-was-unplugged"}},true]',
+  const [picked, fallback] = v.env.constraints;
+  assert(v.env.constraints.length === 2 && picked.deviceId.exact === 'a-mic-that-was-unplugged' && !fallback.deviceId,
     'no fallback to the default mic: ' + JSON.stringify(v.env.constraints));
+  // Call processing off: echo cancellation would put the mic in phone-call mode.
+  for (const c of [picked, fallback]) {
+    assert(c.echoCancellation === false && c.autoGainControl === false && c.channelCount === 1,
+      'call processing left on: ' + JSON.stringify(c));
+  }
+  assert(v.env.recorders[0].opts.audioBitsPerSecond === 64000, 'bitrate ' + v.env.recorders[0].opts.audioBitsPerSecond);
   assert(rec.sourceNode && rec.sourceNode.context, 'no sourceNode for the waveform');
   assert(v.env.recorders[0].opts.mimeType === 'audio/webm;codecs=opus', 'mime ' + v.env.recorders[0].opts.mimeType);
 
@@ -1327,6 +1396,20 @@ check('voice notes record through MediaRecorder and come out as valid Ogg Opus',
   assert(last.flags === 4, 'last page not EOS');
   assert(last.granule === VOICE_SAMPLES, 'granule ' + last.granule + ' != ' + VOICE_SAMPLES);
   assert(pages.every((pg, i) => pg.seq === i), 'page sequence broken');
+});
+
+check('video notes get the same mic, calls keep call processing', async () => {
+  const v = voiceBoot();
+  const md = v.window.navigator.mediaDevices;
+  // WebK's round-video recorder: a square camera.
+  await md.getUserMedia({ video: { width: { ideal: 720 }, height: { ideal: 720 } }, audio: { deviceId: { exact: 'm' } } })
+    .catch(() => {});
+  // A video call: 16:9.
+  await md.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: { deviceId: { exact: 'm' } } })
+    .catch(() => {});
+  const [note, call] = v.env.constraints;
+  assert(note.echoCancellation === false && note.deviceId.exact === 'm', 'video note mic: ' + JSON.stringify(note));
+  assert(!('echoCancellation' in call), 'call lost echo cancellation: ' + JSON.stringify(call));
 });
 
 check('other sites keep their recorder', () => {
@@ -1420,6 +1503,37 @@ for (const [url, expected] of tgCases) {
   check(`tg shouldLoad(${url}) === ${expected}`, () =>
     assert(shouldLoad({ url }, tgPolicy) === expected, `got ${shouldLoad({ url }, tgPolicy)}`));
 }
+
+check('telegram hands refused links to other apps', () => assert(telegramProfile.openExternalLinks, 'flag off'));
+const handoffCases = [
+  ['https://example.com/page?x=1', 'https://example.com/page?x=1'],
+  ['http://example.com/', 'http://example.com/'],
+  // Location messages: coordinates go to whichever maps app is installed.
+  ['https://maps.google.com/maps?q=35.6892,51.389', 'geo:35.6892,51.389?q=35.6892,51.389'],
+  ['https://www.google.com/maps?q=-33.86,151.2', 'geo:-33.86,151.2?q=-33.86,151.2'],
+  ['https://maps.google.com/maps?q=Tehran', 'https://maps.google.com/maps?q=Tehran'],
+  ['mailto:a@b.c', 'mailto:a@b.c'],
+  ['tel:+1234567', 'tel:+1234567'],
+  // Never: the app-store / native-app handoffs, the site itself, junk.
+  ['tg://resolve?domain=x', null],
+  ['intent://t.me/x#Intent;end', null],
+  ['market://details?id=org.telegram.messenger', null],
+  ['https://web.telegram.org/k/', null],
+  ['https://t.me/somechannel', null],
+  ['javascript:alert(1)', null],
+  ['file:///sdcard/x', null],
+  ['not a url', null],
+];
+for (const [url, expected] of handoffCases) {
+  check(`tg externalTarget(${url}) === ${expected}`, () => {
+    const got = externalTarget(url, tgPolicy);
+    assert(got === expected, `got ${got}`);
+  });
+}
+check('a blocked YouTube path is never handed to the YouTube app', () => {
+  const got = externalTarget('https://m.youtube.com/shorts/abc', ytPolicy);
+  assert(got === null, `got ${got}`);
+});
 
 console.log('\n-- build-variant switch --');
 const indexPath = join(out, 'src/filters/profiles/index.js');

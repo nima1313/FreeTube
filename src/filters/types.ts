@@ -82,6 +82,11 @@ export interface SiteProfile {
   allowedHosts: string[];
   /** Site-specific URL schemes to block on top of the shared BLOCKED_SCHEMES. */
   blockedSchemes?: string[];
+  /**
+   * Links to other sites (and mailto:/tel:/geo:) open in whatever app on the
+   * phone handles them, instead of doing nothing. See externalTarget.
+   */
+  openExternalLinks?: boolean;
   userAgent?: string;
   rules: FilterRule[];
 }

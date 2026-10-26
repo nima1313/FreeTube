@@ -25,6 +25,9 @@ export const telegramProfile: SiteProfile = {
   allowedHosts: ['telegram.org', 't.me'],
   // t.me landing pages immediately try to hand off to the native app.
   blockedSchemes: ['tg:'],
+  // Links in messages point anywhere (and a shared location is a Google Maps
+  // link); refusing them made tapping a link do nothing at all.
+  openExternalLinks: true,
   rules: [
     {
       id: 'hide-stories',
