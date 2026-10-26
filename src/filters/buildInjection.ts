@@ -7,6 +7,20 @@ export function isRuleEnabled(profile: SiteProfile, enabledMap: EnabledMap, rule
   return enabledMap[ruleId] ?? rule.enabledByDefault;
 }
 
+/**
+ * What the page gets during a focus break ("Unlock for 1 minute"): every
+ * filter off, so hidden tabs, search and chats all come back. Redirects keep
+ * their setting — they keep the site usable rather than filter it (Telegram's
+ * filters only work on Web K).
+ */
+export function pausedEnabledMap(profile: SiteProfile, enabledMap: EnabledMap): EnabledMap {
+  const paused: EnabledMap = {};
+  for (const r of profile.rules) {
+    paused[r.id] = r.redirect ? enabledMap[r.id] ?? r.enabledByDefault : false;
+  }
+  return paused;
+}
+
 /** Path patterns from currently-enabled rules, for the navigation policy. */
 export function activeBlockedPaths(profile: SiteProfile, enabledMap: EnabledMap): string[] {
   return profile.rules

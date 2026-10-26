@@ -63,21 +63,14 @@ function ParamField({
 }
 
 /**
- * "Unlock for 1 minute", under the focus-lock rule: lifts the lock briefly,
- * then it comes back by itself. Counts down instead while a break is running.
+ * "Unlock for 1 minute", under the focus-lock rule: switches every filter off
+ * briefly, then they come back by themselves. Counts down instead while a
+ * break is running.
  */
-function FocusBreakButton({
-  until,
-  lockOn,
-  onPress,
-}: {
-  until: number;
-  lockOn: boolean;
-  onPress(): void;
-}) {
+function FocusBreakButton({ until, onPress }: { until: number; onPress(): void }) {
   const [now, setNow] = useState(Date.now());
   const left = Math.ceil((until - now) / 1000);
-  const running = lockOn && left > 0;
+  const running = left > 0;
 
   useEffect(() => {
     if (!running) return;
@@ -91,8 +84,8 @@ function FocusBreakButton({
   return (
     <View style={styles.breakRow}>
       <Pressable
-        style={[styles.breakButton, (!lockOn || running) && styles.breakButtonOff]}
-        disabled={!lockOn || running}
+        style={[styles.breakButton, running && styles.breakButtonOff]}
+        disabled={running}
         onPress={() => {
           setNow(Date.now());
           onPress();
@@ -101,7 +94,9 @@ function FocusBreakButton({
       >
         <Text style={styles.breakText}>{label}</Text>
       </Pressable>
-      {lockOn ? null : <Text style={styles.description}>Turn on Block other chats to use this.</Text>}
+      <Text style={styles.description}>
+        Everything these filters hide comes back for 60 seconds, then focus mode returns by itself.
+      </Text>
     </View>
   );
 }
@@ -149,7 +144,7 @@ export default function SettingsScreen({
                   />
                 ) : null}
                 {item.jsAction === 'focusLock' ? (
-                  <FocusBreakButton until={focusBreakUntil} lockOn={enabled} onPress={onFocusBreak} />
+                  <FocusBreakButton until={focusBreakUntil} onPress={onFocusBreak} />
                 ) : null}
               </View>
               <Switch value={enabled} onValueChange={(v) => onToggle(item.id, v)} />

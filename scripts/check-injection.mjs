@@ -41,7 +41,7 @@ for (const f of files) {
 const { youtubeProfile } = require(join(out, 'src/filters/profiles/youtube.js'));
 const { instagramProfile } = require(join(out, 'src/filters/profiles/instagram.js'));
 const { telegramProfile } = require(join(out, 'src/filters/profiles/telegram.js'));
-const { buildBootstrap, buildApplyCall, buildDebugCall, buildFocusBreakCall, activeBlockedPaths } = require(
+const { buildBootstrap, buildApplyCall, buildDebugCall, buildFocusBreakCall, pausedEnabledMap, activeBlockedPaths } = require(
   join(out, 'src/filters/buildInjection.js')
 );
 const { shouldLoad, externalTarget } = require(join(out, 'src/webview/navigation.js'));
@@ -1203,6 +1203,38 @@ check('the break lifts the folder lock too', async () => {
   skipAhead(d.window, 61000);
   await sleep(250);
   assert(folderGuard(d), 'folder lock did not come back');
+});
+
+check('a break pauses every filter except redirects', () => {
+  const real = { ...LOCK, 'hide-folder-tabs': true, 'hide-search': true, 'stay-on-webk': true };
+  const paused = pausedEnabledMap(telegramProfile, real);
+  const on = Object.keys(paused).filter((id) => paused[id]);
+  assert(JSON.stringify(on) === '["stay-on-webk"]', 'still on: ' + JSON.stringify(on));
+  assert(Object.keys(paused).length === telegramProfile.rules.length, 'some rules left to their defaults');
+});
+
+check('during a break the filters come off, then come back and reopen the focus folder', async () => {
+  const real = { ...LOCK, 'hide-folder-tabs': true };
+  const { d, tab } = folderBoot(real);
+  await sleep(FOCUS_SETTLE_MS);
+  const css = () => d.window.document.getElementById('__unhook_css').textContent;
+  assert(css().includes('folders-tabs-scrollable'), 'setup: tabs should be hidden');
+  // What App does on "Unlock for 1 minute".
+  d.window.eval(buildApplyCall(telegramProfile, pausedEnabledMap(telegramProfile, real)));
+  startBreak(d);
+  await sleep(250);
+  assert(!css().includes('folders-tabs-scrollable'), 'tabs still hidden during the break');
+  assert(/Focus Mode back in/.test((breakPill(d) || {}).textContent), 'no countdown while the lock rule is paused');
+  tab('tab-all').click();
+  await sleep(250);
+  assert(!folderGuard(d) && tab('tab-all').classList.contains('active'), 'could not leave the focus folder');
+  // ...and when it ends.
+  skipAhead(d.window, 61000);
+  d.window.eval(buildApplyCall(telegramProfile, real));
+  await sleep(FOCUS_SETTLE_MS);
+  assert(css().includes('folders-tabs-scrollable'), 'tabs not hidden again');
+  assert(tab('tab-focus').classList.contains('active'), 'focus folder not reopened');
+  assert(!breakPill(d), 'countdown outlived the break');
 });
 
 check('folders stay open without the lock, during search, and when the list is not showing', async () => {

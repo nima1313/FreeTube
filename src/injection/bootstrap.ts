@@ -725,10 +725,11 @@ export const BOOTSTRAP_TEMPLATE = `
   var guardPeer = null;
   var guardToken = 0;
 
-  // A short, deliberate way out: "Unlock for 1 minute" in the app's Settings
-  // sets breakUntil (through __unhook.focusBreak), both locks stay off until
-  // then with a countdown on screen, and then they come back by themselves.
-  // Native re-sends it after a reload, so reloading doesn't end it early.
+  // A short, deliberate way out: "Unlock for 1 minute" in the app's Settings.
+  // Native switches every filter off for the minute (pausedEnabledMap) and
+  // sets breakUntil through __unhook.focusBreak, which draws the countdown and
+  // keeps both locks off even if a rule update lands mid-break. Native
+  // re-sends it after a reload, so reloading doesn't end it early.
   var BREAK_ID = '__unhook_break';
   var breakUntil = 0;
 
@@ -873,7 +874,7 @@ export const BOOTSTRAP_TEMPLATE = `
   // The countdown pill. It ignores touches, so nothing under it is blocked.
   function showBreak() {
     var pill = document.getElementById(BREAK_ID);
-    if (!onBreak() || !actionEnabled('focusLock')) {
+    if (!onBreak()) {
       if (pill && pill.parentNode) pill.parentNode.removeChild(pill);
       return;
     }
