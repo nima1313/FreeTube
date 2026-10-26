@@ -89,7 +89,10 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
         blockedSchemes: profile.blockedSchemes,
       };
       if (shouldLoad(req, policy)) return true;
-      const target = profile.openExternalLinks ? externalTarget(req.url, policy) : null;
+      // Only the page itself: an embed navigating inside its frame must not
+      // throw the user out to another app.
+      const target =
+        profile.openExternalLinks && req.isTopFrame !== false ? externalTarget(req.url, policy) : null;
       if (target) {
         const now = Date.now();
         const last = lastHandoff.current;
