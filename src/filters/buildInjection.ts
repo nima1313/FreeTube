@@ -60,6 +60,11 @@ export function buildApplyCall(
   );
 }
 
+/** Lift the focus lock until `until` (epoch ms); see the bootstrap's setBreak. */
+export function buildFocusBreakCall(until: number): string {
+  return 'window.__unhook && window.__unhook.focusBreak(' + Math.floor(until) + '); true;';
+}
+
 /** Toggle the debug outline mode inside the page. */
 export function buildDebugCall(on: boolean): string {
   return 'window.__unhook && window.__unhook.debug(' + (on ? 'true' : 'false') + '); true;';

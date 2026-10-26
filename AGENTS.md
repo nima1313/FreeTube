@@ -82,10 +82,11 @@ rules carry on:
   focus folder is still running, during search (`.is-search-active`), while a
   WebK menu is open (`.btn-menu.active`), and whenever `elementsFromPoint` says
   something else (settings, a popup, an open chat) is over the list.
-  The overlays' second button, **Unlock for 1 minute**, lifts both locks for
-  60s with a countdown pill (`__unhook_break`, `pointer-events:none`); they
-  return by themselves when it runs out. The break lives only in the page, so
-  a reload ends it early.
+  **Unlock for 1 minute** is a button in Settings, under Block other chats
+  (not on the overlays). It injects `__unhook.focusBreak(until)`, which lifts
+  both locks until that time with a countdown pill (`__unhook_break`,
+  `pointer-events:none`); they return by themselves when it runs out.
+  `BrowserScreen` re-sends the break on `onLoadEnd`, so a reload doesn't end it.
 - **Hide the menu button** must not hide `.animated-menu-icon.state-back`: the
   same element draws the back arrow that closes search, and with the search
   bar also hidden, search mode is otherwise a blank column with no way out.

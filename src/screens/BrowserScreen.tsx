@@ -11,7 +11,13 @@ import { AppState, BackHandler, Linking, StyleSheet, View } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 import { DownloadMessage, handleDownloadMessage, syncSavedDocs } from '../device/downloads';
 import { setFullscreenOrientation, setKeepAwake } from '../device/screen';
-import { activeBlockedPaths, buildApplyCall, buildBootstrap, buildDebugCall } from '../filters/buildInjection';
+import {
+  activeBlockedPaths,
+  buildApplyCall,
+  buildBootstrap,
+  buildDebugCall,
+  buildFocusBreakCall,
+} from '../filters/buildInjection';
 import { EnabledMap, ParamMap, SiteProfile } from '../filters/types';
 import { USER_AGENT } from '../webview/constants';
 import { externalTarget, LoadPolicy, LoadRequest, shouldLoad } from '../webview/navigation';
@@ -21,6 +27,8 @@ export interface BrowserHandle {
   goBack(): boolean;
   applyRules(enabledMap: EnabledMap, paramMap: ParamMap): void;
   setDebug(on: boolean): void;
+  /** Lifts the focus lock until `until` (epoch ms). */
+  startFocusBreak(until: number): void;
   reload(): void;
 }
 
@@ -37,6 +45,9 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
   const lastUrl = useRef('');
   // Mirrors the wake lock so repeated reports don't thrash the native module.
   const awake = useRef(false);
+  // A reload re-runs the bootstrap, which forgets the break; onLoadEnd
+  // sends it again while it is still running.
+  const breakUntil = useRef(0);
 
   // Used at page-load time; runtime toggles go through applyRules instead.
   const bootstrap = useMemo(
@@ -60,6 +71,10 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
     },
     setDebug(on: boolean) {
       webviewRef.current?.injectJavaScript(buildDebugCall(on));
+    },
+    startFocusBreak(until: number) {
+      breakUntil.current = until;
+      webviewRef.current?.injectJavaScript(buildFocusBreakCall(until));
     },
     reload() {
       webviewRef.current?.reload();
@@ -196,6 +211,9 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
         injectedJavaScript={bootstrap}
         onLoadEnd={() => {
           webviewRef.current?.injectJavaScript(bootstrap);
+          if (breakUntil.current > Date.now()) {
+            webviewRef.current?.injectJavaScript(buildFocusBreakCall(breakUntil.current));
+          }
           syncSavedDocs(inject);
         }}
         onShouldStartLoadWithRequest={onShouldStart}

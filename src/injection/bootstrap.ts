@@ -725,10 +725,10 @@ export const BOOTSTRAP_TEMPLATE = `
   var guardPeer = null;
   var guardToken = 0;
 
-  // A short, deliberate way out: the overlay's "1 minute" button lifts both
-  // locks until breakUntil, with a countdown on screen, and then they come
-  // back by themselves. The break is gone on reload, which only locks sooner.
-  var BREAK_MS = 60 * 1000;
+  // A short, deliberate way out: "Unlock for 1 minute" in the app's Settings
+  // sets breakUntil (through __unhook.focusBreak), both locks stay off until
+  // then with a countdown on screen, and then they come back by themselves.
+  // Native re-sends it after a reload, so reloading doesn't end it early.
   var BREAK_ID = '__unhook_break';
   var breakUntil = 0;
 
@@ -848,32 +848,22 @@ export const BOOTSTRAP_TEMPLATE = `
       onBack();
     });
 
-    var pause = document.createElement('button');
-    pause.textContent = 'Unlock for 1 minute';
-    pause.setAttribute(
-      'style',
-      'display:block;margin:14px auto 0;background:none;color:#fff;opacity:0.7;' +
-        'border:1px solid rgba(255,255,255,0.35);border-radius:20px;' +
-        'padding:8px 16px;font:13px system-ui,sans-serif;'
-    );
-    pause.addEventListener('click', function (e) {
-      e.preventDefault();
-      e.stopPropagation();
-      startBreak();
-    });
-
     box.appendChild(icon);
     box.appendChild(heading);
     box.appendChild(sub);
     box.appendChild(btn);
-    box.appendChild(pause);
     ov.appendChild(box);
     host.appendChild(ov);
     return ov;
   }
 
-  function startBreak() {
-    breakUntil = Date.now() + BREAK_MS;
+  // until: epoch ms, from native (same device clock as the page's).
+  function setBreak(until) {
+    breakUntil = Number(until) || 0;
+    if (!onBreak()) {
+      showBreak();
+      return;
+    }
     removeGuard();
     removeFolderGuard();
     showBreak();
@@ -1891,6 +1881,10 @@ export const BOOTSTRAP_TEMPLATE = `
     // From native: the Telegram documents already saved to Downloads.
     savedDocs: function (ids, add) {
       setSavedDocs(ids, add);
+    },
+    // From native: Settings' "Unlock for 1 minute".
+    focusBreak: function (until) {
+      setBreak(until);
     },
     debug: function (on) {
       state.debug = !!on;

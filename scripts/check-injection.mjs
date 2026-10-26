@@ -41,7 +41,7 @@ for (const f of files) {
 const { youtubeProfile } = require(join(out, 'src/filters/profiles/youtube.js'));
 const { instagramProfile } = require(join(out, 'src/filters/profiles/instagram.js'));
 const { telegramProfile } = require(join(out, 'src/filters/profiles/telegram.js'));
-const { buildBootstrap, buildApplyCall, buildDebugCall, activeBlockedPaths } = require(
+const { buildBootstrap, buildApplyCall, buildDebugCall, buildFocusBreakCall, activeBlockedPaths } = require(
   join(out, 'src/filters/buildInjection.js')
 );
 const { shouldLoad, externalTarget } = require(join(out, 'src/webview/navigation.js'));
@@ -1116,13 +1116,21 @@ function skipAhead(w, ms) {
   w.Date.now = () => now() + ms;
 }
 const breakPill = (d) => d.window.document.getElementById('__unhook_break');
-const breakButton = (ov) => ov.querySelectorAll('button')[1];
+// What Settings' "Unlock for 1 minute" injects.
+const startBreak = (d) => d.window.eval(buildFocusBreakCall(d.window.Date.now() + 60000));
+
+check('the overlay only offers "Back to focus"', async () => {
+  const { d } = lockBoot('Spam 7');
+  await sleep(250);
+  const buttons = [...guard(d).querySelectorAll('button')].map((b) => b.textContent);
+  assert(buttons.length === 1, 'buttons: ' + JSON.stringify(buttons));
+});
 
 check('"Unlock for 1 minute" lifts the lock, then it comes back', async () => {
   const { d } = lockBoot('Spam 7');
   await sleep(250);
-  breakButton(guard(d)).click();
-  assert(!guard(d), 'overlay survived the break button');
+  startBreak(d);
+  assert(!guard(d), 'overlay survived the break');
   await sleep(250);
   assert(!guard(d), 'overlay came back during the break');
   assert(/Focus Mode back in (1:00|0:[0-5]\d)$/.test(breakPill(d).textContent), 'countdown: ' + breakPill(d).textContent);
@@ -1187,7 +1195,8 @@ check('the break lifts the folder lock too', async () => {
   await sleep(FOCUS_SETTLE_MS);
   tab('tab-all').click();
   await sleep(250);
-  breakButton(folderGuard(d)).click();
+  assert(folderGuard(d), 'setup: folder should be covered');
+  startBreak(d);
   await sleep(250);
   assert(!folderGuard(d), 'other folder still covered during the break');
   assert(tab('tab-all').classList.contains('active'), 'break switched folders');

@@ -18,6 +18,7 @@ import {
 } from './src/storage/settings';
 
 const profile = activeProfile;
+const FOCUS_BREAK_MS = 60 * 1000;
 
 // Android 16 / RN 0.81+ force edge-to-edge with no opt-out, and React Native's
 // own SafeAreaView is iOS-only — without this the WebView drew under the status
@@ -30,6 +31,7 @@ function Root() {
   const [paramMap, setParamMap] = useState<ParamMap | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [debug, setDebug] = useState(false);
+  const [breakUntil, setBreakUntil] = useState(0);
 
   // Each handler below changes one map but has to re-inject both, and a
   // useCallback with [] deps would close over a stale copy of the other.
@@ -64,6 +66,14 @@ function Root() {
   const onToggleDebug = useCallback((value: boolean) => {
     setDebug(value);
     browserRef.current?.setDebug(value);
+  }, []);
+
+  // Settings closes too: the break is for going somewhere in Telegram.
+  const onFocusBreak = useCallback(() => {
+    const until = Date.now() + FOCUS_BREAK_MS;
+    setBreakUntil(until);
+    browserRef.current?.startFocusBreak(until);
+    setSettingsOpen(false);
   }, []);
 
   // Wait for stored settings before mounting the WebView so the very first
@@ -105,6 +115,8 @@ function Root() {
             onToggle={onToggle}
             onParamChange={onParamChange}
             onToggleDebug={onToggleDebug}
+            focusBreakUntil={breakUntil}
+            onFocusBreak={onFocusBreak}
             onReload={() => {
               browserRef.current?.reload();
               setSettingsOpen(false);

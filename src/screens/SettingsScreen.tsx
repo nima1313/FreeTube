@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   FlatList,
   Pressable,
@@ -18,6 +18,9 @@ interface Props {
   onToggle(ruleId: string, value: boolean): void;
   onParamChange(ruleId: string, value: string): void;
   onToggleDebug(value: boolean): void;
+  /** When the current focus break ends (epoch ms); 0 or past means none. */
+  focusBreakUntil: number;
+  onFocusBreak(): void;
   onReload(): void;
   onClose(): void;
 }
@@ -59,6 +62,50 @@ function ParamField({
   );
 }
 
+/**
+ * "Unlock for 1 minute", under the focus-lock rule: lifts the lock briefly,
+ * then it comes back by itself. Counts down instead while a break is running.
+ */
+function FocusBreakButton({
+  until,
+  lockOn,
+  onPress,
+}: {
+  until: number;
+  lockOn: boolean;
+  onPress(): void;
+}) {
+  const [now, setNow] = useState(Date.now());
+  const left = Math.ceil((until - now) / 1000);
+  const running = lockOn && left > 0;
+
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(t);
+  }, [running]);
+
+  const label = running
+    ? `Unlocked — focus back in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`
+    : 'Unlock for 1 minute';
+  return (
+    <View style={styles.breakRow}>
+      <Pressable
+        style={[styles.breakButton, (!lockOn || running) && styles.breakButtonOff]}
+        disabled={!lockOn || running}
+        onPress={() => {
+          setNow(Date.now());
+          onPress();
+        }}
+        accessibilityRole="button"
+      >
+        <Text style={styles.breakText}>{label}</Text>
+      </Pressable>
+      {lockOn ? null : <Text style={styles.description}>Turn on Block other chats to use this.</Text>}
+    </View>
+  );
+}
+
 export default function SettingsScreen({
   profile,
   enabledMap,
@@ -67,6 +114,8 @@ export default function SettingsScreen({
   onToggle,
   onParamChange,
   onToggleDebug,
+  focusBreakUntil,
+  onFocusBreak,
   onReload,
   onClose,
 }: Props) {
@@ -98,6 +147,9 @@ export default function SettingsScreen({
                     enabled={enabled}
                     onCommit={(v) => onParamChange(item.id, v)}
                   />
+                ) : null}
+                {item.jsAction === 'focusLock' ? (
+                  <FocusBreakButton until={focusBreakUntil} lockOn={enabled} onPress={onFocusBreak} />
                 ) : null}
               </View>
               <Switch value={enabled} onValueChange={(v) => onToggle(item.id, v)} />
@@ -162,6 +214,17 @@ const styles = StyleSheet.create({
     color: '#000',
   },
   paramDisabled: { backgroundColor: '#f2f2f2', color: '#999' },
+  breakRow: { marginTop: 10 },
+  breakButton: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#3390ec',
+  },
+  breakButtonOff: { opacity: 0.45 },
+  breakText: { fontSize: 14, fontWeight: '600', color: '#3390ec' },
   reload: { margin: 16, padding: 12, borderRadius: 8, backgroundColor: '#f2f2f2', alignItems: 'center' },
   reloadText: { fontSize: 15, fontWeight: '600', color: '#c00' },
 });
