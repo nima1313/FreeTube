@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Base64
+import android.webkit.MimeTypeMap
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.exception.Exceptions
 import expo.modules.kotlin.modules.Module
@@ -17,6 +18,14 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
+
+private val GENERIC_TYPES = setOf(
+  "application/octet-stream",
+  "binary/octet-stream",
+  "application/x-download",
+  "application/download",
+  "application/force-download",
+)
 
 private class UnknownDownloadException(id: String) :
   CodedException("No open download '$id'")
@@ -111,7 +120,8 @@ class DownloadsModule : Module() {
         false
       } else {
         val intent = Intent(Intent.ACTION_VIEW).apply {
-          setDataAndType(uri, info.second)
+          // Files saved before types were fixed up may still say octet-stream.
+          setDataAndType(uri, typeFor(info.first, info.second))
           addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         try {
@@ -157,9 +167,23 @@ class DownloadsModule : Module() {
     null
   }
 
-  private fun open(rawName: String, mime: String): Transfer {
+  /**
+   * The page's MIME type, or the one Android knows for the file's extension
+   * when that type is generic. Telegram often only knows "application/
+   * octet-stream", and opening a file as that gets Android's "open with" list
+   * of unrelated apps instead of, say, the package installer for an .apk.
+   */
+  private fun typeFor(name: String, mime: String?): String {
+    val m = mime?.substringBefore(';')?.trim()?.lowercase().orEmpty()
+    if (m.isNotEmpty() && m !in GENERIC_TYPES) return m
+    val ext = name.substringAfterLast('.', "").lowercase()
+    return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+  }
+
+  private fun open(rawName: String, pageMime: String): Transfer {
     // The name comes from the page; keep it a single plain path segment.
     val name = rawName.replace(Regex("[\\\\/:*?\"<>|\\x00-\\x1f]"), "_").trim().ifEmpty { "download" }
+    val mime = typeFor(name, pageMime)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
       val values = ContentValues().apply {
         put(MediaStore.MediaColumns.DISPLAY_NAME, name)

@@ -90,7 +90,7 @@ export const BOOTSTRAP_TEMPLATE = `
     // The chat filter's page flags ride along, and outside the debug swap:
     // they toggle state rather than hide a filtered element.
     var extra = ruleFor('chatWhitelist') || ruleFor('chatBlacklist') ? CHAT_FILTER_CSS : '';
-    el.textContent = sels.join(',\\n') + decl + extra + SAVED_DOC_CSS;
+    el.textContent = sels.join(',\\n') + decl + extra + SAVED_DOC_CSS + CAM_CSS;
   }
 
   // --- Redirects ------------------------------------------------------------
@@ -1773,6 +1773,202 @@ export const BOOTSTRAP_TEMPLATE = `
     });
   };
 
+  // --- Video notes: switch camera --------------------------------------------
+  // The Telegram app can flip between the front and back camera while a video
+  // note records; WebK opens one camera and has no switch. So WebK's camera
+  // request gets a stream whose video track is a canvas fed from the real
+  // camera: flipping swaps the camera behind the canvas, and WebK keeps
+  // recording one unbroken track. The canvas is square (WebK crops to a square
+  // anyway), so cameras with different shapes don't change its size.
+  //
+  // WebK mirrors the live preview, which is only right for the front camera;
+  // with the back camera on, <html data-unhook-cam="environment"> undoes it.
+
+  var CAM_ATTR = 'data-unhook-cam';
+  var CAM_BTN_ID = '__unhook_cam_flip';
+  var CAM_SIDE = 720;
+  var CAM_CSS =
+    '\\nhtml[' + CAM_ATTR + '="environment"] .video-recording-preview { transform: none !important; }';
+  // The live video-note camera, or null.
+  var camRig = null;
+
+  function videoNoteStream(gum, c) {
+    return gum(c).then(function (cam) {
+      var vt = cam.getVideoTracks()[0];
+      var canvas = document.createElement('canvas');
+      if (!vt || typeof canvas.captureStream !== 'function') return cam;
+      canvas.width = canvas.height = CAM_SIDE;
+      var rig = {
+        gum: gum,
+        base: c.video,
+        cam: cam,
+        facing: (vt.getSettings && vt.getSettings().facingMode) || 'user',
+        video: document.createElement('video'),
+        canvas: canvas,
+        ctx: canvas.getContext('2d'),
+        switching: false,
+        stopped: false,
+      };
+      rig.video.muted = true;
+      rig.video.playsInline = true;
+      rig.video.srcObject = new MediaStream([vt]);
+      var played = rig.video.play();
+      if (played && played.catch) played.catch(function () {});
+      rig.track = canvas.captureStream(30).getVideoTracks()[0];
+      // WebK ends the recording by stopping every track it was given.
+      var stopTrack = rig.track.stop;
+      rig.track.stop = function () {
+        stopTrack.call(this);
+        endCamRig(rig);
+      };
+      if (camRig) endCamRig(camRig);
+      camRig = rig;
+      setCamFacing(rig.facing);
+      drawCamFrame(rig);
+      return new MediaStream([rig.track].concat(cam.getAudioTracks()));
+    });
+  }
+
+  // Centre-crops the camera into the square canvas. rAF, like WebK's own
+  // loop: the video is never in the DOM, so rVFC would not fire.
+  function drawCamFrame(rig) {
+    if (rig.stopped) return;
+    var v = rig.video;
+    var vw = v.videoWidth;
+    var vh = v.videoHeight;
+    // While switching, the last frame stays up instead of a black one.
+    if (vw && vh && !rig.switching) {
+      var side = Math.min(vw, vh);
+      rig.ctx.drawImage(v, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, CAM_SIDE, CAM_SIDE);
+    }
+    requestAnimationFrame(function () {
+      drawCamFrame(rig);
+    });
+  }
+
+  function stopVideo(stream) {
+    stream.getVideoTracks().forEach(function (t) {
+      t.stop();
+    });
+  }
+
+  function endCamRig(rig) {
+    if (rig.stopped) return;
+    rig.stopped = true;
+    stopVideo(rig.cam);
+    rig.video.srcObject = null;
+    if (camRig === rig) {
+      camRig = null;
+      setCamFacing('');
+      removeCamButton();
+    }
+  }
+
+  function setCamFacing(facing) {
+    var root = document.documentElement;
+    if (!root) return;
+    if (facing) root.setAttribute(CAM_ATTR, facing);
+    else root.removeAttribute(CAM_ATTR);
+  }
+
+  function camConstraints(rig, facing) {
+    var v = {};
+    var base = rig.base && typeof rig.base === 'object' ? rig.base : {};
+    for (var k in base) if (k !== 'deviceId' && k !== 'facingMode') v[k] = base[k];
+    v.facingMode = { exact: facing };
+    return { video: v };
+  }
+
+  function flipCamera(rig) {
+    if (rig.switching || rig.stopped) return;
+    rig.switching = true;
+    var next = rig.facing === 'user' ? 'environment' : 'user';
+    // Free the open camera first: many phones can't run two at once.
+    stopVideo(rig.cam);
+    function use(stream, facing) {
+      if (rig.stopped) {
+        stopVideo(stream);
+        return;
+      }
+      rig.cam = stream;
+      rig.facing = facing;
+      rig.video.srcObject = stream;
+      var p = rig.video.play();
+      if (p && p.catch) p.catch(function () {});
+      setCamFacing(facing);
+    }
+    rig
+      .gum(camConstraints(rig, next))
+      .then(function (stream) {
+        use(stream, next);
+        post({ type: 'action', what: 'camera-flip', facing: next });
+      })
+      .catch(function () {
+        // No such camera: bring the one we had back.
+        return rig.gum(camConstraints(rig, rig.facing)).then(function (stream) {
+          use(stream, rig.facing);
+        });
+      })
+      .catch(function (e) {
+        console.warn('[unhook] camera switch failed', e);
+      })
+      .then(function () {
+        rig.switching = false;
+      });
+  }
+
+  function removeCamButton() {
+    var b = document.getElementById(CAM_BTN_ID);
+    if (b && b.parentNode) b.parentNode.removeChild(b);
+  }
+
+  // The flip button, beside WebK's preview circle while it records.
+  function syncCamButton() {
+    var rig = camRig;
+    if (rig && rig.track && rig.track.readyState === 'ended') endCamRig(rig);
+    var circle = camRig && document.querySelector('.video-recording-stage--recording .video-recording-circle');
+    if (!circle) {
+      removeCamButton();
+      return;
+    }
+    var b = document.getElementById(CAM_BTN_ID);
+    if (!b) {
+      b = document.createElement('button');
+      b.id = CAM_BTN_ID;
+      b.setAttribute('aria-label', 'Switch camera');
+      b.innerHTML =
+        '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#fff" stroke-width="2" ' +
+        'stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 0 0-14.9-3M4 13a8 8 0 0 0 14.9 3"/>' +
+        '<path d="M4 4v4h4M20 20v-4h-4"/></svg>';
+      b.setAttribute(
+        'style',
+        'position:fixed;z-index:2147483002;width:48px;height:48px;border-radius:24px;border:none;' +
+          'padding:0;display:flex;align-items:center;justify-content:center;' +
+          'background:rgba(0,0,0,0.55);touch-action:manipulation;'
+      );
+      // WebK must not see these: a stray tap can end or cancel the recording.
+      var swallow = function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+      };
+      ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend'].forEach(function (type) {
+        b.addEventListener(type, swallow);
+      });
+      b.addEventListener('click', function (e) {
+        swallow(e);
+        if (camRig) flipCamera(camRig);
+      });
+      (document.body || document.documentElement).appendChild(b);
+    }
+    var r = circle.getBoundingClientRect();
+    var left = Math.min(r.right - 24, window.innerWidth - 56);
+    var top = Math.min(r.bottom - 24, window.innerHeight - 56);
+    b.style.left = Math.max(8, left) + 'px';
+    b.style.top = Math.max(8, top) + 'px';
+  }
+
+  if (location.hostname === 'web.telegram.org') setInterval(syncCamButton, 200);
+
   // Video notes are WebK's own recorder, which asks for a square camera
   // (ideal width === ideal height) — calls ask for 16:9 and keep the call
   // processing they need. The mic of a video note gets NOTE_AUDIO too.
@@ -1794,7 +1990,7 @@ export const BOOTSTRAP_TEMPLATE = `
         var copy = {};
         for (var k in c) copy[k] = c[k];
         copy.audio = noteAudio(c.audio);
-        c = copy;
+        return videoNoteStream(orig.bind(md), copy);
       }
       return orig.call(this, c);
     };

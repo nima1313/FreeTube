@@ -1,0 +1,107 @@
+diff --git a/node_modules/react-native-webview/android/src/main/java/com/reactnativecommunity/webview/RNCWebViewModuleImpl.java b/node_modules/react-native-webview/android/src/main/java/com/reactnativecommunity/webview/RNCWebViewModuleImpl.java
+index 951749c..03b9d93 100644
+--- a/node_modules/react-native-webview/android/src/main/java/com/reactnativecommunity/webview/RNCWebViewModuleImpl.java
++++ b/node_modules/react-native-webview/android/src/main/java/com/reactnativecommunity/webview/RNCWebViewModuleImpl.java
+@@ -264,48 +264,71 @@ public class RNCWebViewModuleImpl implements ActivityEventListener {
+ 
+     public boolean startPhotoPickerIntent(final String[] acceptTypes, final boolean allowMultiple, final ValueCallback<Uri[]> callback, final boolean isCaptureEnabled) {
+         mFilePathCallback = callback;
++        mOutputImage = null;
++        mOutputVideo = null;
+         Activity activity = mContext.getCurrentActivity();
+ 
+-        ArrayList<Parcelable> extraIntents = new ArrayList<>();
+-        Intent photoIntent = null;
+-        if (!needsCameraPermission()) {
+-            if (acceptsImages(acceptTypes)) {
+-                photoIntent = getPhotoIntent();
+-                if (photoIntent != null) {
+-                    extraIntents.add(photoIntent);
+-                }
+-            }
+-            if (acceptsVideo(acceptTypes)) {
+-                Intent videoIntent = getVideoIntent();
+-                if (videoIntent != null) {
+-                    extraIntents.add(videoIntent);
+-                }
+-            }
+-        }
+-
+-        Intent chooserIntent = new Intent(Intent.ACTION_CHOOSER);
++        // Patched (FreeTube): open the picker itself. Upstream wraps it in
++        // ACTION_CHOOSER together with camera and camcorder intents once the
++        // app holds CAMERA, which puts a slow "choose an app" sheet in front of
++        // every upload. Photos and videos go to Android's photo picker, other
++        // files to the system file browser.
++        Intent intent;
+         if (isCaptureEnabled) {
+-            chooserIntent = photoIntent;
++            intent = needsCameraPermission() ? null : getPhotoIntent();
+         } else {
+-            Intent fileSelectionIntent = getFileChooserIntent(acceptTypes, allowMultiple);
+-
+-            chooserIntent.putExtra(Intent.EXTRA_INTENT, fileSelectionIntent);
+-            chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, extraIntents.toArray(new Parcelable[]{}));
++            intent = getMediaPickerIntent(acceptTypes, allowMultiple);
++            if (intent == null) {
++                intent = getFileChooserIntent(acceptTypes, allowMultiple);
++            }
+         }
+ 
+-        if (chooserIntent != null) {
+-            if (chooserIntent.resolveActivity(activity.getPackageManager()) != null) {
+-                activity.startActivityForResult(chooserIntent, PICKER);
+-            } else {
+-                Log.w("RNCWebViewModule", "there is no Activity to handle this Intent");
++        boolean started = false;
++        if (activity != null && intent != null) {
++            try {
++                activity.startActivityForResult(intent, PICKER);
++                started = true;
++            } catch (android.content.ActivityNotFoundException e) {
++                Log.w("RNCWebViewModule", "there is no Activity to handle this Intent", e);
+             }
+-        } else {
+-            Log.w("RNCWebViewModule", "there is no Camera permission");
+         }
+-
++        if (!started) {
++            // The page waits on this callback; leaving it unanswered breaks
++            // every later file input until a reload.
++            mFilePathCallback = null;
++            callback.onReceiveValue(null);
++        }
+         return true;
+     }
+ 
++    // Android's photo picker (API 33+), when the input only takes images
++    // and/or videos; null otherwise. Needs no storage permission.
++    private Intent getMediaPickerIntent(String[] acceptTypes, boolean allowMultiple) {
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
++            return null;
++        }
++        boolean images = false;
++        boolean videos = false;
++        for (String raw : getAcceptedMimeType(acceptTypes)) {
++            String t = raw == null ? "" : raw.trim().toLowerCase();
++            if (t.isEmpty()) continue;
++            if (t.startsWith("image/")) images = true;
++            else if (t.startsWith("video/")) videos = true;
++            else return null;
++        }
++        if (!images && !videos) {
++            return null;
++        }
++        Intent intent = new Intent(MediaStore.ACTION_PICK_IMAGES);
++        if (images != videos) {
++            intent.setType(images ? "image/*" : "video/*");
++        }
++        if (allowMultiple) {
++            intent.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, MediaStore.getPickImagesMaxLimit());
++        }
++        return intent;
++    }
++
+     public void setDownloadRequest(DownloadManager.Request request) {
+         mDownloadRequest = request;
+     }

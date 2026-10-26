@@ -145,7 +145,10 @@ fetches too) and posts `{type:'download', phase:'start'|'chunk'|'end'|'error'}`
 with ~512 KB base64 chunks. `src/device/downloads.ts` queues these, in order,
 into the local Expo module `modules/downloads`, which writes into the public
 Downloads folder through MediaStore (no permission needed; the file stays
-`IS_PENDING` until it's complete). **The `download` message type is
+`IS_PENDING` until it's complete). Telegram often types files as
+`application/octet-stream`; the module swaps a generic type for the one the
+extension implies (when saving and when opening), or Android offers random
+apps instead of e.g. the installer for an `.apk`. **The `download` message type is
 load-bearing in release builds**, like playback/fullscreen.
 
 Tapping a saved file opens it, like the Telegram app (there is no "saved"
@@ -187,6 +190,24 @@ suppression stays. Video notes are WebK's own recorder, so the bootstrap wraps
 (ideal width === height, as WebK's round-video recorder asks); calls ask for
 16:9 and keep their call processing. The cost: WebK's
 media editor sees no `AudioEncoder`, so edited videos can't keep their sound.
+
+WebK has no camera switch for video notes, so the same wrapper hands WebK a
+stream whose video track is a 720px square canvas fed from the real camera
+(`videoNoteStream`); a flip button (`__unhook_cam_flip`) beside
+`.video-recording-stage--recording .video-recording-circle` swaps the camera
+behind it (old one stopped first — phones can't open two) and WebK records
+on undisturbed. WebK always mirrors the preview, so
+`html[data-unhook-cam="environment"]` turns that off for the back camera.
+
+# File uploads
+
+`patches/react-native-webview+13.16.1.patch` replaces the file chooser. Upstream
+wraps the picker in `ACTION_CHOOSER` with camera/camcorder intents whenever the
+app holds CAMERA (FreeTele/FreeGram do, for video messages), which puts a slow
+"choose an app" sheet before every upload. Patched: image/video-only inputs
+open Android's photo picker (`ACTION_PICK_IMAGES`, API 33+), anything else
+`ACTION_GET_CONTENT`; the page's callback is always answered. The camera is no
+longer offered from the attach menu (video notes don't need it).
 
 # Device behavior (screen wake + rotation)
 

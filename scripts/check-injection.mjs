@@ -1453,6 +1453,110 @@ check('video notes get the same mic, calls keep call processing', async () => {
   assert(!('echoCancellation' in call), 'call lost echo cancellation: ' + JSON.stringify(call));
 });
 
+// Fake cameras: each getUserMedia call opens one, and a phone can hold only
+// one camera open at a time.
+function camBoot() {
+  const env = { opened: [], open: 0, maxOpen: 0, frontOnly: false };
+  const d = boot(TG_HTML, TG_URL, telegramProfile, {}, {}, (w) => {
+    const track = (kind, facing) => {
+      const t = { kind, facing, readyState: 'live', getSettings: () => ({ facingMode: facing }) };
+      t.stop = () => {
+        if (t.readyState === 'live' && kind === 'video' && facing !== 'canvas') env.open--;
+        t.readyState = 'ended';
+      };
+      return t;
+    };
+    w.MediaStream = class {
+      constructor(tracks = []) {
+        this.tracks = tracks;
+      }
+      getTracks() { return this.tracks; }
+      getVideoTracks() { return this.tracks.filter((t) => t.kind === 'video'); }
+      getAudioTracks() { return this.tracks.filter((t) => t.kind === 'audio'); }
+    };
+    w.navigator.mediaDevices = {
+      getUserMedia: (c) => {
+        const want = c.video && c.video.facingMode;
+        const facing = (want && (want.exact || want)) || 'user';
+        if (env.frontOnly && facing === 'environment') {
+          return Promise.reject(Object.assign(new Error('none'), { name: 'OverconstrainedError' }));
+        }
+        env.opened.push({ facing, audio: c.audio });
+        env.open++;
+        env.maxOpen = Math.max(env.maxOpen, env.open);
+        const tracks = [track('video', facing)];
+        if (c.audio) tracks.push(track('audio'));
+        return Promise.resolve(new w.MediaStream(tracks));
+      },
+    };
+    w.HTMLCanvasElement.prototype.getContext = () => ({ drawImage() {} });
+    w.HTMLCanvasElement.prototype.captureStream = function () {
+      return new w.MediaStream([track('video', 'canvas')]);
+    };
+    w.HTMLMediaElement.prototype.play = () => Promise.resolve();
+  });
+  return { ...d, env };
+}
+const NOTE = { video: { width: { ideal: 720 }, height: { ideal: 720 }, facingMode: 'user' }, audio: true };
+const camBtn = (d) => d.window.document.getElementById('__unhook_cam_flip');
+function showRecordingPanel(d) {
+  const stage = d.window.document.createElement('div');
+  stage.className = 'video-recording-stage video-recording-stage--recording';
+  stage.innerHTML = '<div class="video-recording-circle"><video class="video-recording-preview"></video></div>';
+  d.window.document.body.appendChild(stage);
+  return stage;
+}
+
+check('video notes can switch camera mid-recording', async () => {
+  const d = camBoot();
+  const stream = await d.window.navigator.mediaDevices.getUserMedia(NOTE);
+  const [vt] = stream.getVideoTracks();
+  assert(vt.facing === 'canvas' && stream.getAudioTracks().length === 1, 'WebK got the raw camera');
+  assert(!camBtn(d), 'button before the recording panel shows');
+  showRecordingPanel(d);
+  await sleep(300);
+  assert(camBtn(d), 'no switch-camera button while recording');
+  assert(d.window.document.documentElement.getAttribute('data-unhook-cam') === 'user', 'facing not tracked');
+
+  camBtn(d).click();
+  await sleep(50);
+  assert(JSON.stringify(d.env.opened.map((o) => o.facing)) === '["user","environment"]', 'opened ' + JSON.stringify(d.env.opened));
+  assert(d.env.maxOpen === 1, 'two cameras open at once');
+  assert(!d.env.opened[1].audio, 'the switch reopened the microphone');
+  assert(d.window.document.documentElement.getAttribute('data-unhook-cam') === 'environment', 'not marked as back camera');
+  assert(d.css().includes('data-unhook-cam="environment"'), 'no un-mirror rule');
+  assert(vt.readyState === 'live' && stream.getVideoTracks()[0] === vt, "WebK's track changed");
+
+  // WebK ends the recording by stopping its tracks: the camera goes too.
+  stream.getTracks().forEach((t) => t.stop());
+  await sleep(300);
+  assert(d.env.open === 0, 'camera left on');
+  assert(!camBtn(d), 'button outlived the recording');
+  assert(!d.window.document.documentElement.hasAttribute('data-unhook-cam'), 'facing mark left behind');
+});
+
+check('a phone without a back camera keeps the front one', async () => {
+  const d = camBoot();
+  d.env.frontOnly = true;
+  const stream = await d.window.navigator.mediaDevices.getUserMedia(NOTE);
+  showRecordingPanel(d);
+  await sleep(300);
+  camBtn(d).click();
+  await sleep(50);
+  assert(JSON.stringify(d.env.opened.map((o) => o.facing)) === '["user","user"]', 'opened ' + JSON.stringify(d.env.opened));
+  assert(d.env.open === 1, 'no camera after a failed switch');
+  assert(d.window.document.documentElement.getAttribute('data-unhook-cam') === 'user', 'facing wrong');
+  stream.getTracks().forEach((t) => t.stop());
+});
+
+check('calls get the camera untouched', async () => {
+  const d = camBoot();
+  const stream = await d.window.navigator.mediaDevices.getUserMedia({
+    video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: true,
+  });
+  assert(stream.getVideoTracks()[0].facing === 'user', 'a call got the canvas track');
+});
+
 check('other sites keep their recorder', () => {
   const v = voiceBoot('https://m.youtube.com/', youtubeProfile);
   assert(typeof v.window.AudioEncoder === 'function', 'AudioEncoder hidden on youtube');
