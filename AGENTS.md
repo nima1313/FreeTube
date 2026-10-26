@@ -28,6 +28,17 @@ switch. The `--clean` flag is already in those scripts.
 Metro only inlines `EXPO_PUBLIC_*` vars that are referenced as a literal
 `process.env.NAME` dot access. Don't destructure or use bracket access.
 
+# Icons
+
+All three apps share one design: a close-up of the Statue of Liberty's torch
+with the site's own logo as the flame. `scripts/make-icons.mjs` draws it (SVG
+on Android's 108-unit adaptive-icon grid) and renders, per variant,
+`assets/icons/<site>/{icon,foreground,monochrome}.png` with headless Chrome
+(`node scripts/make-icons.mjs`). `app.config.ts` picks the folder and sets the
+background colour, which has to match `ICON_BACKGROUNDS` in the script. Keep
+anything that matters within ~34 units of the centre: launchers show only
+the middle 72 units, cropped to their own shape.
+
 # Telegram (FreeTele)
 
 **Telegram Web K only** (`/k/`), ported from the unhookTelegram extension

@@ -10,7 +10,12 @@ interface Variant {
   name: string;
   slug: string;
   androidPackage: string;
-  /** Adaptive-icon background — the cheapest way to tell the two apps apart. */
+  /**
+   * assets/icons/<icons>/ — the Liberty-torch icon with this site's logo as
+   * the flame, drawn by scripts/make-icons.mjs.
+   */
+  icons: string;
+  /** Adaptive-icon background; must match ICON_BACKGROUNDS in make-icons.mjs. */
   iconBackground: string;
   /**
    * Extra manifest permissions. react-native-webview already turns a page's
@@ -33,12 +38,14 @@ const VARIANTS: Record<string, Variant> = {
     name: 'FreeTube',
     slug: 'FreeTube',
     androidPackage: 'com.nima.freetube',
-    iconBackground: '#E6F4FE',
+    icons: 'youtube',
+    iconBackground: '#FDECEA',
   },
   instagram: {
     name: 'FreeGram',
     slug: 'FreeGram',
     androidPackage: 'com.nima.freegram',
+    icons: 'instagram',
     iconBackground: '#FDE7F3',
     permissions: MEDIA_CAPTURE,
   },
@@ -46,9 +53,8 @@ const VARIANTS: Record<string, Variant> = {
     name: 'FreeTele',
     slug: 'FreeTele',
     androidPackage: 'com.nima.freetele',
-    // Teal, not Telegram's blue: FreeTube already owns the pale blue above, and
-    // this colour is the only thing telling the launcher icons apart.
-    iconBackground: '#D7F0EA',
+    icons: 'telegram',
+    iconBackground: '#DCEFFB',
     // Tapping a downloaded APK hands it to Android's installer, which refuses
     // apps that don't declare this ("install unknown apps" is then asked once).
     permissions: [...MEDIA_CAPTURE, 'android.permission.REQUEST_INSTALL_PACKAGES'],
@@ -68,16 +74,21 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     );
   }
 
+  const icons = './assets/icons/' + variant.icons + '/';
   return {
     ...config,
     name: variant.name,
     slug: variant.slug,
+    icon: icons + 'icon.png',
     android: {
       ...(config.android ?? {}),
       package: variant.androidPackage,
       permissions: [...(config.android?.permissions ?? []), ...(variant.permissions ?? [])],
+      // Built fresh rather than spread from app.json: a backgroundImage there
+      // would win over the colour.
       adaptiveIcon: {
-        ...(config.android?.adaptiveIcon ?? {}),
+        foregroundImage: icons + 'foreground.png',
+        monochromeImage: icons + 'monochrome.png',
         backgroundColor: variant.iconBackground,
       },
     },
