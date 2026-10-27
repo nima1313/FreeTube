@@ -1581,6 +1581,65 @@ check('big photos are encoded once, at 0.9', () => {
   assert(JSON.stringify(calls) === JSON.stringify(want), JSON.stringify(calls));
 });
 
+check('a shared file reaches WebK whole, and text goes to its share link', async () => {
+  const d = boot(TG_HTML, TG_URL, telegramProfile);
+  const w = d.window;
+  const shared = [];
+  w.apiManagerProxy = {};
+  w.appImManager = { chat: {}, checkForShare() { shared.push(w.apiManagerProxy.share); } };
+  const b64 = (str) => Buffer.from(str).toString('base64');
+  w.__unhook.shareBegin({ text: null, subject: null, files: [{ name: 'a.txt', mime: 'text/plain' }, { name: 'b.bin', mime: 'application/octet-stream' }] });
+  w.__unhook.shareChunk(0, b64('hello '));
+  w.__unhook.shareChunk(0, b64('world'));
+  w.__unhook.shareChunk(1, b64('x'));
+  const acks = d.posted.filter((m) => m.type === 'share' && m.phase === 'ack').length;
+  assert(acks === 3, 'acks: ' + acks);
+  w.__unhook.shareEnd();
+  assert(shared.length === 1, 'checkForShare calls: ' + shared.length);
+  const files = shared[0].files;
+  assert(files.length === 2 && files[0].name === 'a.txt' && files[0].type === 'text/plain', 'files: ' + JSON.stringify(files.map((f) => [f.name, f.type])));
+  const text = await new Promise((resolve) => {
+    const r = new w.FileReader();
+    r.onload = () => resolve(r.result);
+    r.readAsText(files[0]);
+  });
+  assert(text === 'hello world', 'content: ' + text);
+
+  w.__unhook.shareBegin({ text: 'https://example.com/x', subject: 'Example', files: [] });
+  w.__unhook.shareEnd();
+  assert(shared.length === 2 && shared[1].files.length === 0 && shared[1].text === 'https://example.com/x' && shared[1].title === 'Example', JSON.stringify(shared[1]));
+});
+
+check('a big share shows its progress until it is handed over', () => {
+  const d = boot(TG_HTML, TG_URL, telegramProfile);
+  const w = d.window;
+  w.apiManagerProxy = {};
+  w.appImManager = { chat: {}, checkForShare() {} };
+  const pill = () => w.document.getElementById('__unhook_share');
+  w.__unhook.shareBegin({ text: null, subject: null, files: [{ name: 'v.mp4', mime: 'video/mp4', size: 8 * 1024 * 1024 }] });
+  assert(pill() && /0%/.test(pill().textContent), 'no pill at the start: ' + (pill() && pill().textContent));
+  w.__unhook.shareChunk(0, Buffer.alloc(2 * 1024 * 1024).toString('base64'));
+  assert(/25%/.test(pill().textContent), 'progress: ' + pill().textContent);
+  w.__unhook.shareEnd();
+  assert(!pill(), 'pill left behind');
+  w.__unhook.shareBegin({ text: null, subject: null, files: [{ name: 'a.jpg', mime: 'image/jpeg', size: 300000 }] });
+  assert(!pill(), 'pill for a small file');
+  w.__unhook.shareAbort();
+});
+
+check('a share waits for Telegram to load', async () => {
+  const d = boot(TG_HTML, TG_URL, telegramProfile);
+  const w = d.window;
+  w.__unhook.shareBegin({ text: 'hi', subject: null, files: [] });
+  w.__unhook.shareEnd();
+  const shared = [];
+  await new Promise((r) => setTimeout(r, 100));
+  w.apiManagerProxy = {};
+  w.appImManager = { chat: {}, checkForShare() { shared.push(w.apiManagerProxy.share); } };
+  await new Promise((r) => setTimeout(r, 500));
+  assert(shared.length === 1 && shared[0].text === 'hi', 'shared: ' + JSON.stringify(shared));
+});
+
 check('other sites keep their recorder', () => {
   const v = voiceBoot('https://m.youtube.com/', youtubeProfile);
   assert(typeof v.window.AudioEncoder === 'function', 'AudioEncoder hidden on youtube');

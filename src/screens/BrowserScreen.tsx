@@ -12,6 +12,12 @@ import { WebView, WebViewMessageEvent } from 'react-native-webview';
 import { DownloadMessage, handleDownloadMessage, syncSavedDocs } from '../device/downloads';
 import { setFullscreenOrientation, setKeepAwake } from '../device/screen';
 import {
+  handleShareMessage,
+  setSharePageReady,
+  ShareMessage,
+  startShareTarget,
+} from '../device/share';
+import {
   activeBlockedPaths,
   buildApplyCall,
   buildBootstrap,
@@ -150,6 +156,9 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
     return () => sub.remove();
   }, [setPlaying, inject]);
 
+  // Files and text shared to the app from other apps' share sheets.
+  useEffect(() => startShareTarget(inject), [inject]);
+
   // Nothing else releases these if the screen goes away mid-video.
   useEffect(
     () => () => {
@@ -172,7 +181,11 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
       // be handled in release builds too, so they run before the __DEV__ log.
       if (msg.type === 'playback') setPlaying(!!msg.playing);
       else if (msg.type === 'fullscreen') setFullscreenOrientation(!!msg.on);
-      else if (msg.type === 'download') {
+      else if (msg.type === 'share') {
+        // Load-bearing too: each file chunk waits for the page's ack.
+        handleShareMessage(msg as ShareMessage);
+        return;
+      } else if (msg.type === 'download') {
         // Also load-bearing. Returns before the log: a chunk is ~700KB of base64.
         handleDownloadMessage(msg as DownloadMessage, inject);
         if (__DEV__ && msg.phase !== 'chunk') console.log('[unhook] download', msg.phase);
@@ -211,12 +224,14 @@ const BrowserScreen = forwardRef<BrowserHandle, Props>(({ profile, enabledMap, p
         // path — it's the one that avoids a flash of unfiltered content.
         injectedJavaScriptBeforeContentLoaded={bootstrap}
         injectedJavaScript={bootstrap}
+        onLoadStart={() => setSharePageReady(false)}
         onLoadEnd={() => {
           webviewRef.current?.injectJavaScript(bootstrap);
           if (breakUntil.current > Date.now()) {
             webviewRef.current?.injectJavaScript(buildFocusBreakCall(breakUntil.current));
           }
           syncSavedDocs(inject);
+          setSharePageReady(true);
         }}
         onShouldStartLoadWithRequest={onShouldStart}
         onNavigationStateChange={(nav) => {

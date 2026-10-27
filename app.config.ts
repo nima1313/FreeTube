@@ -23,6 +23,11 @@ interface Variant {
    * permission the manifest doesn't declare — so without these, no dialog.
    */
   permissions?: string[];
+  /**
+   * Lists the app in Android's share sheet. What arrives is handed to the
+   * site's own share handling; see src/device/share.ts.
+   */
+  shareTarget?: boolean;
 }
 
 // Voice/video messages. MODIFY_AUDIO_SETTINGS is install-time (no prompt);
@@ -32,6 +37,14 @@ const MEDIA_CAPTURE = [
   'android.permission.CAMERA',
   'android.permission.MODIFY_AUDIO_SETTINGS',
 ];
+
+// One file, several files, or text (a link), of any type: the same set the
+// Telegram app accepts.
+const SHARE_INTENT_FILTERS = ['SEND', 'SEND_MULTIPLE'].map((action) => ({
+  action,
+  category: ['DEFAULT'],
+  data: [{ mimeType: '*/*' }],
+}));
 
 const VARIANTS: Record<string, Variant> = {
   youtube: {
@@ -58,6 +71,7 @@ const VARIANTS: Record<string, Variant> = {
     // Tapping a downloaded APK hands it to Android's installer, which refuses
     // apps that don't declare this ("install unknown apps" is then asked once).
     permissions: [...MEDIA_CAPTURE, 'android.permission.REQUEST_INSTALL_PACKAGES'],
+    shareTarget: true,
   },
 };
 
@@ -91,6 +105,10 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         monochromeImage: icons + 'monochrome.png',
         backgroundColor: variant.iconBackground,
       },
+      intentFilters: [
+        ...(config.android?.intentFilters ?? []),
+        ...(variant.shareTarget ? SHARE_INTENT_FILTERS : []),
+      ],
     },
   };
 };

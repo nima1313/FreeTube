@@ -2059,6 +2059,136 @@ export const BOOTSTRAP_TEMPLATE = `
     } catch (e) {}
   })();
 
+  // --- Share target ---------------------------------------------------------
+  // What another app shares to FreeTele (src/device/share.ts) arrives here as
+  // shareBegin, one shareChunk per ~384 KB of each file (each acknowledged, so
+  // native sends the next), then shareEnd. Each chunk becomes a Blob straight
+  // away, which keeps big videos out of the JS heap.
+  //
+  // WebK already is a share target as a web app: its service worker takes the
+  // POST from the manifest's share_target, puts the data on
+  // apiManagerProxy.share, and appImManager.checkForShare() opens Telegram's
+  // chat picker, then the caption popup for files or a draft for text. This
+  // does the same without the service worker. Should WebK rename those, the
+  // fallback is that same POST to ./share/, which reloads the page into the
+  // share.
+
+  var SHARE_WAIT_MS = 60000;
+  var SHARE_PILL_ID = '__unhook_share';
+  // Smaller shares arrive before a pill would be readable.
+  var SHARE_PILL_MIN_BYTES = 4 * 1024 * 1024;
+  var shareIn = null;
+
+  function shareBegin(meta) {
+    var total = 0;
+    (meta.files || []).forEach(function (f) { if (f.size > 0) total += f.size; });
+    shareIn = { meta: meta, parts: (meta.files || []).map(function () { return []; }), total: total, got: 0 };
+    shareProgress();
+  }
+
+  function shareChunk(i, b64) {
+    if (shareIn && shareIn.parts[i]) {
+      var bin = atob(b64);
+      var bytes = new Uint8Array(bin.length);
+      for (var k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
+      shareIn.parts[i].push(new Blob([bytes]));
+      shareIn.got += bytes.length;
+      shareProgress();
+    }
+    post({ type: 'share', phase: 'ack' });
+  }
+
+  // A pill over the chat while a big file is copied in, which takes a few
+  // seconds per 100 MB; without it the share looks like it did nothing.
+  function shareProgress() {
+    var pill = document.getElementById(SHARE_PILL_ID);
+    if (!shareIn || shareIn.total < SHARE_PILL_MIN_BYTES) {
+      if (pill && pill.parentNode) pill.parentNode.removeChild(pill);
+      return;
+    }
+    if (!pill) {
+      var host = document.body || document.documentElement;
+      if (!host) return;
+      pill = document.createElement('div');
+      pill.id = SHARE_PILL_ID;
+      pill.setAttribute(
+        'style',
+        'position:fixed;z-index:2147483001;bottom:84px;left:50%;transform:translateX(-50%);' +
+          'pointer-events:none;background:rgba(24,34,45,0.9);color:#fff;' +
+          'border-radius:16px;padding:6px 14px;font:13px/1.4 system-ui,sans-serif;'
+      );
+      host.appendChild(pill);
+    }
+    var n = shareIn.parts.length;
+    var text =
+      'Getting ' + (n === 1 ? 'the file' : n + ' files') + ' ready\\u2026 ' +
+      Math.min(100, Math.floor((shareIn.got / shareIn.total) * 100)) + '%';
+    if (pill.textContent !== text) pill.textContent = text;
+  }
+
+  function shareEnd() {
+    var s = shareIn;
+    shareIn = null;
+    shareProgress();
+    if (!s) return;
+    var files = (s.meta.files || []).map(function (f, i) {
+      return new File(s.parts[i], f.name, { type: f.mime });
+    });
+    openShare(
+      { files: files, title: s.meta.subject || undefined, text: s.meta.text || undefined, url: undefined },
+      Date.now()
+    );
+  }
+
+  // Waits for Telegram to be up (signed in, app loaded), then hands it over.
+  function openShare(data, started) {
+    var im = window.appImManager;
+    var amp = window.apiManagerProxy;
+    if (im && amp && im.chat) {
+      if (typeof im.checkForShare === 'function') {
+        amp.share = data;
+        im.checkForShare();
+      } else {
+        shareByPost(data);
+      }
+      post({ type: 'action', what: 'share' });
+      return;
+    }
+    if (Date.now() - started > SHARE_WAIT_MS) {
+      console.warn('[unhook] Telegram never got ready for the share');
+      return;
+    }
+    setTimeout(function () { openShare(data, started); }, 300);
+  }
+
+  function shareByPost(data) {
+    var form = document.createElement('form');
+    form.method = 'POST';
+    form.enctype = 'multipart/form-data';
+    form.action = './share/';
+    form.style.display = 'none';
+    ['title', 'text'].forEach(function (key) {
+      if (!data[key]) return;
+      var input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = key;
+      input.value = data[key];
+      form.appendChild(input);
+    });
+    if (data.files.length) {
+      var dt = new DataTransfer();
+      data.files.forEach(function (f) { dt.items.add(f); });
+      var input = document.createElement('input');
+      input.type = 'file';
+      input.name = 'files';
+      input.multiple = true;
+      input.files = dt.files;
+      form.appendChild(input);
+    }
+    document.body.appendChild(form);
+    form.submit();
+  }
+
   // --- SPA survival ---------------------------------------------------------
 
   // The observer needs a root element, which does not always exist yet at
@@ -2118,6 +2248,20 @@ export const BOOTSTRAP_TEMPLATE = `
     // From native: the Telegram documents already saved to Downloads.
     savedDocs: function (ids, add) {
       setSavedDocs(ids, add);
+    },
+    // From native: something shared to the app (see Share target).
+    shareBegin: function (meta) {
+      shareBegin(meta);
+    },
+    shareChunk: function (i, b64) {
+      shareChunk(i, b64);
+    },
+    shareEnd: function () {
+      shareEnd();
+    },
+    shareAbort: function () {
+      shareIn = null;
+      shareProgress();
     },
     // From native: Settings' "Unlock for 1 minute".
     focusBreak: function (until) {

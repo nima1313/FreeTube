@@ -173,6 +173,29 @@ vanishing. The bootstrap raises an untouched 1-week setting to 1 year (the
 longest WebK offers) through `managers.appStateManager.setByKey
 ('settings.cacheTTL', …)`, leaving any other value alone.
 
+# Share target (FreeTele)
+
+FreeTele is in Android's share sheet: `shareTarget` on the telegram variant in
+`app.config.ts` adds `SEND` / `SEND_MULTIPLE` intent filters for `*/*` (a
+`prebuild --clean` picks them up). The local module `modules/share` takes the
+intent — as the launch intent (JS calls `take()` on mount), as a new intent
+to the running singleTask activity, or on a recreated activity (both fire
+`onShare`) — and marks it taken so it is never shared twice.
+`src/device/share.ts` streams each file into the page as base64 chunks
+(1.5 MB, each acked with `{type:'share', phase:'ack'}` before the next, the
+next read overlapping the ack; **load-bearing in release builds**). Most of
+the cost per chunk is the round trip: 60 MB takes ~6s on the emulator, so
+shares over 4 MB show a "Getting the file ready… N%" pill.
+
+The page doesn't need its own share UI: WebK is a share target as a web app
+(manifest `share_target` → POST `./share/` → its service worker), and the
+service worker only puts `{files, title, text, url}` on
+`apiManagerProxy.share` for `appImManager.checkForShare()`. The bootstrap
+does the same, waiting up to 60s for Telegram to load (a cold start from the
+share sheet). Files get Telegram's chat picker, then the caption popup; text
+goes into the chosen chat as a draft. Should WebK rename those globals, the
+bootstrap falls back to submitting that POST itself (reloads the page).
+
 # Voice messages (FreeTele)
 
 WebK records voice notes through WebAudio (an AudioWorklet) into a WebCodecs
